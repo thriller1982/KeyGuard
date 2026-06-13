@@ -1,4 +1,4 @@
-# Recovered Password Manager
+# KeyGuard - Password Manager
 
 这是从 `密码管理软件.exe` 中恢复出来的开发项目版本。
 

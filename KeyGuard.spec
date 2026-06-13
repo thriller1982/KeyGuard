@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='密码管理器',
+    name='KeyGuard',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

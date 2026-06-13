@@ -1,4 +1,4 @@
-# 密码管理器 (Recovered Project)
+# KeyGuard - Password Manager
 
 从 `密码管理软件.exe` 反向恢复的 Python 项目。
 
