@@ -4,9 +4,19 @@ import string
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 import i18n
+
+
+PBKDF2_ITERATIONS_LEGACY = 600000
+
+DEFAULT_ARGON2_PARAMS = {
+    "time_cost": 3,
+    "memory_cost_kib": 65536,
+    "parallelism": 2,
+}
 
 
 def generate_salt() -> bytes:
@@ -15,14 +25,65 @@ def generate_salt() -> bytes:
 
 
 def derive_key(password: str, salt: bytes) -> bytes:
-    """基于密码和盐值通过 PBKDF2 派生对称加密密钥。"""
+    """基于密码和盐值通过 PBKDF2-SHA256(600k) 派生密钥。
+
+    保留用于兼容旧版 passwords.json 解密与迁移流程，新库请使用
+    ``derive_key_argon2id`` / ``derive_key_for_kdf``。
+    """
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
         salt=salt,
-        iterations=600000,
+        iterations=PBKDF2_ITERATIONS_LEGACY,
     )
     return base64.urlsafe_b64encode(kdf.derive(password.encode()))
+
+
+def derive_key_argon2id(password: str, salt: bytes, params: dict | None = None) -> bytes:
+    """基于密码和盐值通过 Argon2id 派生对称加密密钥。
+
+    params 可覆盖 time_cost / memory_cost_kib / parallelism，缺省取
+    ``DEFAULT_ARGON2_PARAMS``。返回值与 ``derive_key`` 同为 urlsafe-b64
+    的 32 字节密钥，可直接喂给 Fernet。
+    """
+    p = dict(DEFAULT_ARGON2_PARAMS)
+    if params:
+        p.update({k: v for k, v in params.items() if k in p})
+
+    kdf = Argon2id(
+        salt=salt,
+        length=32,
+        iterations=int(p["time_cost"]),
+        lanes=int(p["parallelism"]),
+        memory_cost=int(p["memory_cost_kib"]),
+    )
+    return base64.urlsafe_b64encode(kdf.derive(password.encode("utf-8")))
+
+
+def derive_key_for_kdf(password: str, salt: bytes, kdf_spec: dict) -> bytes:
+    """根据 kdf_spec 中的 algorithm 字段分发到具体的 KDF 实现。
+
+    支持的算法：
+        - "argon2id": 使用 Argon2id，params 字段透传
+        - "pbkdf2_sha256": 使用 PBKDF2-SHA256，params.iterations
+          缺省为 ``PBKDF2_ITERATIONS_LEGACY``（兼容旧库）
+
+    未知算法抛出 ValueError。
+    """
+    algorithm = (kdf_spec or {}).get("algorithm")
+    if algorithm == "argon2id":
+        return derive_key_argon2id(password, salt, (kdf_spec or {}).get("params"))
+    if algorithm == "pbkdf2_sha256":
+        params = (kdf_spec or {}).get("params", {}) or {}
+        iterations = int(params.get("iterations", PBKDF2_ITERATIONS_LEGACY))
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=iterations,
+        )
+        return base64.urlsafe_b64encode(kdf.derive(password.encode("utf-8")))
+    raise ValueError(f"unsupported kdf algorithm: {algorithm!r}")
 
 
 COMMON_PASSWORDS = [

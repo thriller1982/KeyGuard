@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+.pytest_cache/
 data/
 config.json
 passwords.json
@@ -7,3 +8,7 @@ backups/
 build/
 dist/
 .claude/
+*.kgvault
+*.kgvault.tmp
+*.kgvault.recovery
+*.bak

@@ -1,6 +1,7 @@
 import secrets
 import string
 import sys
+import uuid
 
 from PySide6.QtCore import QLibraryInfo, Qt, QTimer, QTranslator
 from PySide6.QtGui import QFont
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFormLayout,
     QHeaderView,
     QHBoxLayout,
@@ -442,6 +444,7 @@ class EntryDialog(QDialog):
 
     def get_data(self):
         return {
+            "id": self.entry.get("id") if self.entry else uuid.uuid4().hex,
             "name": self.name_edit.text(),
             "url": self.url_edit.text(),
             "username": self.username_edit.text(),
@@ -456,10 +459,11 @@ class ChangePasswordDialog(QDialog):
     master_key: bytes
     master_salt: bytes
 
-    def __init__(self, master_key: bytes, master_salt: bytes, parent=None):
+    def __init__(self, master_key: bytes, master_salt: bytes, kdf_spec: dict, parent=None):
         super().__init__(parent)
         self.master_key = master_key
         self.master_salt = master_salt
+        self.kdf_spec = kdf_spec
         self.setMinimumWidth(350)
 
         layout = QVBoxLayout(self)
@@ -505,7 +509,9 @@ class ChangePasswordDialog(QDialog):
         new_pass = self.new_pass_edit.text()
         confirm_pass = self.confirm_pass_edit.text()
 
-        derived = crypto_utils.derive_key(old_pass, self.master_salt)
+        derived = crypto_utils.derive_key_for_kdf(
+            old_pass, self.master_salt, self.kdf_spec
+        )
         if not secrets.compare_digest(derived, self.master_key):
             MsgBox.warning(self, i18n._t("error_title"), i18n._t("error_old_pass"))
             return
@@ -530,9 +536,11 @@ class ChangePasswordDialog(QDialog):
 
 
 class AuthDialog(QDialog):
-    def __init__(self, mode: str, parent=None):
+    def __init__(self, mode: str, parent=None, *, title: str | None = None, message: str | None = None):
         super().__init__(parent)
         self.mode = mode
+        self._override_title = title
+        self._override_message = message
         self.setMinimumWidth(360)
 
         layout = QVBoxLayout(self)
@@ -577,16 +585,26 @@ class AuthDialog(QDialog):
         self.password_label.setText(i18n._t("auth_password_label"))
         self.cancel_btn.setText(i18n._t("entry_cancel"))
 
-        if self.mode == "setup":
+        if self._override_title:
+            self.setWindowTitle(self._override_title)
+        elif self.mode == "setup":
             self.setWindowTitle(i18n._t("setup_title"))
+        else:
+            self.setWindowTitle(i18n._t("login_title"))
+
+        if self._override_message:
+            self.message_label.setText(self._override_message)
+        elif self.mode == "setup":
             self.message_label.setText(i18n._t("setup_msg"))
+        else:
+            self.message_label.setText(i18n._t("login_msg"))
+
+        if self.mode == "setup":
             self.confirm_label.setText(i18n._t("confirm_new_pass_label"))
             self.submit_btn.setText(i18n._t("auth_setup_btn"))
             self.update_strength()
             return
 
-        self.setWindowTitle(i18n._t("login_title"))
-        self.message_label.setText(i18n._t("login_msg"))
         self.submit_btn.setText(i18n._t("auth_login_btn"))
 
     def update_strength(self):
@@ -661,12 +679,8 @@ class LockScreen(QDialog):
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumWidth(300)
-        try:
-            config = storage.load_config()
-        except storage.ConfigLoadError:
-            MsgBox.warning(self, i18n._t("error_title"), i18n._t("config_load_failed"))
-            config = storage.DEFAULT_CONFIG.copy()
+        self.setMinimumWidth(320)
+        self._prefs = self._load_prefs(parent)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -678,20 +692,18 @@ class SettingsDialog(QDialog):
         self.auto_lock_combo.addItem(i18n._t("auto_lock_15min"), 15)
         self.auto_lock_combo.addItem(i18n._t("auto_lock_30min"), 30)
 
-        auto_lock = config.get("auto_lock_minutes", 0)
+        auto_lock = self._prefs.get("auto_lock_minutes", 0)
         index = self.auto_lock_combo.findData(auto_lock)
         if index >= 0:
             self.auto_lock_combo.setCurrentIndex(index)
         form.addRow(i18n._t("settings_auto_lock"), self.auto_lock_combo)
 
-        self.auto_backup_cb = QCheckBox()
-        self.auto_backup_cb.setChecked(config.get("auto_backup", False))
-        form.addRow(i18n._t("settings_auto_backup"), self.auto_backup_cb)
-
         self.lang_combo = QComboBox()
         self.lang_combo.addItem("English", "en")
         self.lang_combo.addItem("简体中文", "zh")
-        lang_index = self.lang_combo.findData(config.get("language", i18n.current_lang))
+        lang_index = self.lang_combo.findData(
+            self._prefs.get("language", i18n.current_lang)
+        )
         if lang_index >= 0:
             self.lang_combo.setCurrentIndex(lang_index)
         form.addRow(i18n._t("settings_language"), self.lang_combo)
@@ -702,6 +714,13 @@ class SettingsDialog(QDialog):
         self.change_pass_btn.clicked.connect(self.open_change_password)
         layout.addWidget(self.change_pass_btn)
 
+        self.assoc_btn = QPushButton()
+        self.assoc_btn.clicked.connect(self.toggle_association)
+        layout.addWidget(self.assoc_btn)
+
+        self.assoc_status_label = QLabel()
+        layout.addWidget(self.assoc_status_label)
+
         btn_layout = QHBoxLayout()
         self.save_btn = QPushButton(i18n._t("entry_save"))
         self.save_btn.clicked.connect(self.save_settings)
@@ -711,30 +730,74 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(self.cancel_btn)
         layout.addLayout(btn_layout)
 
+        self.retranslate_ui()
+
+    def _load_prefs(self, parent):
+        if parent is not None and hasattr(parent, "preferences"):
+            return dict(parent.preferences)
+        try:
+            return storage.load_config()
+        except storage.ConfigLoadError:
+            return storage.DEFAULT_PREFERENCES.copy()
+
     def retranslate_ui(self):
         self.setWindowTitle(i18n._t("settings_title"))
         if hasattr(self, "save_btn"):
             self.save_btn.setText(i18n._t("entry_save"))
             self.cancel_btn.setText(i18n._t("entry_cancel"))
             self.change_pass_btn.setText(i18n._t("change_master_pass_btn"))
+            self._refresh_assoc_ui()
+
+    def _refresh_assoc_ui(self):
+        if not hasattr(self, "assoc_btn"):
+            return
+        active = storage.is_kgvault_associated()
+        if storage._current_exe_path() is None:
+            self.assoc_btn.setText(i18n._t("vault_assoc_btn"))
+            self.assoc_btn.setEnabled(False)
+            self.assoc_status_label.setText(i18n._t("vault_assoc_unsupported"))
+            return
+        if active:
+            self.assoc_btn.setText(i18n._t("vault_assoc_remove_btn"))
+            self.assoc_btn.setEnabled(True)
+            self.assoc_status_label.setText(i18n._t("vault_assoc_active"))
+        else:
+            self.assoc_btn.setText(i18n._t("vault_assoc_btn"))
+            self.assoc_btn.setEnabled(True)
+            self.assoc_status_label.setText(i18n._t("vault_assoc_inactive"))
+
+    def toggle_association(self):
+        if storage._current_exe_path() is None:
+            MsgBox.warning(self, i18n._t("error_title"), i18n._t("vault_assoc_unsupported"))
+            return
+        if storage.is_kgvault_associated():
+            storage.unregister_kgvault_association()
+            MsgBox.information(self, i18n._t("settings_title"), i18n._t("vault_assoc_removed"))
+        else:
+            if storage.register_kgvault_association():
+                MsgBox.information(self, i18n._t("settings_title"), i18n._t("vault_assoc_success"))
+            else:
+                MsgBox.warning(self, i18n._t("error_title"), i18n._t("vault_assoc_failed"))
+        self._refresh_assoc_ui()
 
     def save_settings(self):
-        try:
-            config = storage.load_config()
-        except storage.ConfigLoadError:
-            MsgBox.warning(self, i18n._t("error_title"), i18n._t("config_load_failed"))
-            config = storage.DEFAULT_CONFIG.copy()
-        config["auto_lock_minutes"] = self.auto_lock_combo.currentData()
-        config["auto_backup"] = self.auto_backup_cb.isChecked()
-
         new_lang = self.lang_combo.currentData()
-        lang_changed = new_lang != config.get("language", i18n.current_lang)
-        config["language"] = new_lang
-        try:
-            storage.save_config(config)
-        except storage.ConfigSaveError:
-            MsgBox.warning(self, i18n._t("error_title"), i18n._t("config_save_failed"))
-            return
+        lang_changed = new_lang != self._prefs.get("language", i18n.current_lang)
+
+        self._prefs["auto_lock_minutes"] = self.auto_lock_combo.currentData()
+        self._prefs["language"] = new_lang
+
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "save_preferences"):
+            if not parent.save_preferences(self._prefs):
+                MsgBox.warning(self, i18n._t("error_title"), i18n._t("vault_save_failed"))
+                return
+        else:
+            try:
+                storage.save_config(self._prefs)
+            except storage.ConfigSaveError:
+                MsgBox.warning(self, i18n._t("error_title"), i18n._t("config_save_failed"))
+                return
 
         if lang_changed:
             i18n.set_language(new_lang)
@@ -748,7 +811,6 @@ class SettingsDialog(QDialog):
             app._qt_translator.load(f"qt_{locale_name}", translations_path)
             app.installTranslator(app._qt_translator)
 
-            parent = self.parent()
             if parent and hasattr(parent, "retranslate_ui"):
                 parent.retranslate_ui()
             if parent and hasattr(parent, "refresh_table"):
@@ -761,3 +823,76 @@ class SettingsDialog(QDialog):
         parent = self.parent()
         if parent and hasattr(parent, "change_master_password"):
             parent.change_master_password()
+
+
+class VaultPickerDialog(QDialog):
+    """启动时让用户选择新建或打开保险库的对话框。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumWidth(360)
+        self.chosen_path = None
+        self.chosen_action = None  # "new" | "open"
+
+        layout = QVBoxLayout(self)
+
+        self.title_label = QLabel(i18n._t("vault_picker_title"))
+        self.title_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.title_label)
+
+        self.msg_label = QLabel(i18n._t("vault_picker_msg"))
+        self.msg_label.setWordWrap(True)
+        layout.addWidget(self.msg_label)
+
+        btn_layout = QHBoxLayout()
+        self.new_btn = QPushButton(i18n._t("vault_picker_new"))
+        self.new_btn.clicked.connect(self.choose_new)
+        self.open_btn = QPushButton(i18n._t("vault_picker_open"))
+        self.open_btn.clicked.connect(self.choose_open)
+        btn_layout.addWidget(self.new_btn)
+        btn_layout.addWidget(self.open_btn)
+        layout.addLayout(btn_layout)
+
+        cancel_layout = QHBoxLayout()
+        self.cancel_btn = QPushButton(i18n._t("entry_cancel"))
+        self.cancel_btn.clicked.connect(self.reject)
+        cancel_layout.addStretch()
+        cancel_layout.addWidget(self.cancel_btn)
+        layout.addLayout(cancel_layout)
+
+        self.retranslate_ui()
+
+    def retranslate_ui(self):
+        self.setWindowTitle(i18n._t("vault_picker_title"))
+        self.title_label.setText(i18n._t("vault_picker_title"))
+        self.msg_label.setText(i18n._t("vault_picker_msg"))
+        self.new_btn.setText(i18n._t("vault_picker_new"))
+        self.open_btn.setText(i18n._t("vault_picker_open"))
+        self.cancel_btn.setText(i18n._t("entry_cancel"))
+
+    def choose_new(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            i18n._t("vault_new_btn"),
+            storage.DEFAULT_VAULT_PATH,
+            i18n._t("vault_filter"),
+        )
+        if not path:
+            return
+        self.chosen_path = path
+        self.chosen_action = "new"
+        self.accept()
+
+    def choose_open(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            i18n._t("vault_open_btn"),
+            "",
+            i18n._t("vault_filter"),
+        )
+        if not path:
+            return
+        self.chosen_path = path
+        self.chosen_action = "open"
+        self.accept()
