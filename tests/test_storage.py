@@ -49,7 +49,7 @@ def _make_vault(storage_module, path, password, entries, prefs=None):
     key = crypto_utils.derive_key_for_kdf(password, salt, kdf_spec)
     storage_module.save_vault(
         path, entries, prefs or storage_module.DEFAULT_PREFERENCES.copy(),
-        key, salt, kdf_spec, snapshots=[]
+        key, salt, kdf_spec
     )
     return key, salt, kdf_spec
 
@@ -60,14 +60,13 @@ def test_save_and_load_vault_v3_roundtrip(storage_module):
         storage_module, path, "secret", [{"name": "demo", "password": "v"}],
         prefs={"language": "en", "column_widths": [80, 90]},
     )
-    entries, prefs, k2, s2, kdf2, snaps = storage_module.load_vault(path, "secret")
+    entries, prefs, k2, s2, kdf2 = storage_module.load_vault(path, "secret")
     assert entries[0]["name"] == "demo"
     assert entries[0]["category"] == "other"
     assert k2 == key and s2 == salt
     assert kdf2["algorithm"] == "argon2id"
     assert prefs["language"] == "en"
     assert prefs["column_widths"] == [80, 90]
-    assert snaps == []
 
 
 def test_vault_version_is_3(storage_module):
@@ -77,7 +76,6 @@ def test_vault_version_is_3(storage_module):
         raw = json.load(f)
     assert raw["magic"] == storage_module.VAULT_MAGIC
     assert raw["version"] == 3
-    assert "snapshots" in raw
     assert raw["kdf"]["algorithm"] == "argon2id"
 
 
@@ -94,7 +92,7 @@ def test_load_vault_by_key_roundtrip(storage_module):
     key, salt, kdf_spec = _make_vault(
         storage_module, path, "secret", [{"name": "x", "password": "1"}]
     )
-    entries, prefs, k2, s2, kdf2, snaps = storage_module.load_vault_by_key(path, key)
+    entries, prefs, k2, s2, kdf2 = storage_module.load_vault_by_key(path, key)
     assert entries[0]["name"] == "x"
     assert k2 == key and s2 == salt and kdf2 == kdf_spec
 
@@ -141,52 +139,10 @@ def test_create_new_vault_writes_valid_v3(storage_module):
     path = str(Path(storage_module.get_app_dir()) / "new.kgvault")
     key, salt, kdf_spec = storage_module.create_new_vault(path, "master")
     assert storage_module.is_vault_file(path) is True
-    entries, prefs, k2, s2, kdf2, snaps = storage_module.load_vault(path, "master")
+    entries, prefs, k2, s2, kdf2 = storage_module.load_vault(path, "master")
     assert entries == []
     assert prefs == storage_module.DEFAULT_PREFERENCES
-    assert snaps == []
     assert k2 == key
-
-
-def test_append_snapshot_and_load_snapshot_roundtrip(storage_module):
-    path = str(Path(storage_module.get_app_dir()) / "v.kgvault")
-    key, salt, kdf_spec = _make_vault(
-        storage_module, path, "secret", [{"name": "v1", "password": "1"}]
-    )
-    ts = "2026-07-20 10:00:00"
-    snapshots = storage_module.append_snapshot([], [{"name": "v1", "password": "1"}], {}, key, ts)
-    storage_module.save_vault(
-        path, [{"name": "v2", "password": "2"}], {}, key, salt, kdf_spec, snapshots=snapshots
-    )
-
-    _, _, _, _, _, snaps_loaded = storage_module.load_vault(path, "secret")
-    assert len(snaps_loaded) == 1
-    assert snaps_loaded[0]["timestamp"] == ts
-
-    entries, prefs, change = storage_module.load_snapshot(path, 0, key)
-    assert entries[0]["name"] == "v1"
-
-
-def test_append_snapshot_rotates_to_limit(storage_module):
-    salt = crypto_utils.generate_salt()
-    key = crypto_utils.derive_key_argon2id("pw", salt)
-    snapshots = []
-    for i in range(storage_module.SNAPSHOT_LIMIT + 5):
-        snapshots = storage_module.append_snapshot(
-            snapshots, [{"name": f"v{i}"}], {}, key, f"2026-07-20 10:0{i}:00",
-        )
-    assert len(snapshots) == storage_module.SNAPSHOT_LIMIT
-
-
-def test_append_snapshot_most_recent_first(storage_module):
-    salt = crypto_utils.generate_salt()
-    key = crypto_utils.derive_key_argon2id("pw", salt)
-    snapshots = []
-    snapshots = storage_module.append_snapshot(snapshots, [{"name": "old"}], {}, key, "2026-01-01 00:00:00")
-    snapshots = storage_module.append_snapshot(snapshots, [{"name": "new"}], {}, key, "2026-01-02 00:00:00")
-    assert len(snapshots) == 2
-    assert snapshots[0]["timestamp"] == "2026-01-02 00:00:00"
-    assert snapshots[1]["timestamp"] == "2026-01-01 00:00:00"
 
 
 def test_migrate_legacy_passwords_json_to_v3(storage_module):
@@ -209,13 +165,12 @@ def test_migrate_legacy_passwords_json_to_v3(storage_module):
         str(legacy_pw), str(legacy_cfg), target, "secret"
     )
 
-    entries, prefs, k2, s2, kdf2, snaps = storage_module.load_vault(target, "secret")
+    entries, prefs, k2, s2, kdf2 = storage_module.load_vault(target, "secret")
     assert entries[0]["name"] == "old"
     assert prefs["language"] == "en"
     assert prefs["auto_lock_minutes"] == 5
     assert kdf2["algorithm"] == "argon2id"
     assert k2 == new_key
-    assert snaps == []
     # 旧文件改名 .bak
     assert not legacy_pw.exists()
     assert Path(str(legacy_pw) + ".bak").exists()
@@ -262,39 +217,6 @@ def test_scan_vaults_in_dir_ignores_non_kgvault(storage_module):
     found = storage_module.scan_vaults_in_dir(str(d))
     assert len(found) == 1
     assert found[0] == p1
-
-
-def test_compute_closed_vault_path_format(storage_module):
-    base = str(Path(storage_module.get_app_dir()) / "KeyGuard.kgvault")
-    closed = storage_module.compute_closed_vault_path(base, "20260720_164500")
-    assert closed.endswith("KeyGuard_20260720_164500.kgvault")
-    assert Path(closed).parent == Path(base).parent
-
-
-def test_remove_previous_managed_vault_only_removes_explicit_previous(storage_module):
-    d = Path(storage_module.get_app_dir())
-    keep = str(d / "KeyGuard_20260720_164500.kgvault")
-    old1 = str(d / "KeyGuard_20260720_100000.kgvault")
-    old2 = str(d / "KeyGuard.kgvault")
-    _make_vault(storage_module, keep, "s", [])
-    _make_vault(storage_module, old1, "s", [])
-    _make_vault(storage_module, old2, "s", [])
-
-    assert storage_module.remove_previous_managed_vault(old1, keep) is True
-    assert Path(keep).exists()
-    assert not Path(old1).exists()
-    assert Path(old2).exists()
-
-
-def test_remove_previous_managed_vault_preserves_user_named_file(storage_module):
-    d = Path(storage_module.get_app_dir())
-    keep = str(d / "KeyGuard_20260720_164500.kgvault")
-    user_file = str(d / "personal.kgvault")
-    _make_vault(storage_module, keep, "s", [])
-    _make_vault(storage_module, user_file, "s", [])
-
-    assert storage_module.remove_previous_managed_vault(user_file, keep) is False
-    assert Path(user_file).exists()
 
 
 def test_detect_legacy_passwords_json_returns_none_when_clean(storage_module):
@@ -346,138 +268,6 @@ def test_ensure_entry_ids_preserves_existing(storage_module):
     assert out[1]["id"] == "keep2"
 
 
-def test_compute_changes_field_modified(storage_module):
-    prev = [{"id": "x", "name": "old", "url": "a.com", "username": "u", "password": "p", "category": "website", "notes": "n"}]
-    curr = [{"id": "x", "name": "new", "url": "a.com", "username": "u", "password": "p", "category": "website", "notes": "n"}]
-    change = storage_module.compute_changes(prev, curr)
-    assert change == {"x": ["name"]}
-
-
-def test_compute_changes_multiple_fields(storage_module):
-    prev = [{"id": "x", "name": "old", "url": "a.com", "username": "u", "password": "p", "category": "website", "notes": "n"}]
-    curr = [{"id": "x", "name": "new", "url": "b.com", "username": "u", "password": "p", "category": "website", "notes": "n"}]
-    change = storage_module.compute_changes(prev, curr)
-    assert change == {"x": ["name", "url"]}
-
-
-def test_compute_changes_added_entry_not_in_change(storage_module):
-    prev = [{"id": "x", "name": "a", "url": "", "username": "", "password": "", "category": "other", "notes": ""}]
-    curr = [
-        {"id": "x", "name": "a", "url": "", "username": "", "password": "", "category": "other", "notes": ""},
-        {"id": "y", "name": "new", "url": "", "username": "", "password": "", "category": "other", "notes": ""},
-    ]
-    change = storage_module.compute_changes(prev, curr)
-    assert "y" not in change  # 新增条目不在 change 中
-    assert change == {}
-
-
-def test_compute_changes_deleted_entry_ignored(storage_module):
-    prev = [
-        {"id": "x", "name": "a", "url": "", "username": "", "password": "", "category": "other", "notes": ""},
-        {"id": "y", "name": "b", "url": "", "username": "", "password": "", "category": "other", "notes": ""},
-    ]
-    curr = [{"id": "x", "name": "a", "url": "", "username": "", "password": "", "category": "other", "notes": ""}]
-    change = storage_module.compute_changes(prev, curr)
-    assert change == {}  # 删除的条目 y 不计入
-
-
-def test_compute_changes_password_history_ignored(storage_module):
-    prev = [{"id": "x", "name": "a", "url": "", "username": "", "password": "p1", "category": "other", "notes": "", "password_history": []}]
-    curr = [{"id": "x", "name": "a", "url": "", "username": "", "password": "p1", "category": "other", "notes": "", "password_history": [{"password": "p0", "date": "2026"}]}]
-    change = storage_module.compute_changes(prev, curr)
-    assert change == {}  # password_history 变化不计入
-
-
-def test_compute_changes_no_change_returns_empty(storage_module):
-    prev = [{"id": "x", "name": "a", "url": "b", "username": "u", "password": "p", "category": "website", "notes": "n"}]
-    curr = [{"id": "x", "name": "a", "url": "b", "username": "u", "password": "p", "category": "website", "notes": "n"}]
-    change = storage_module.compute_changes(prev, curr)
-    assert change == {}
-
-
-def test_append_snapshot_with_change(storage_module):
-    salt = crypto_utils.generate_salt()
-    key = crypto_utils.derive_key_argon2id("pw", salt)
-    change = {"x": ["name", "url"]}
-    snapshots = storage_module.append_snapshot([], [{"name": "a"}], {}, key, "2026-01-01 00:00:00", change=change)
-    assert snapshots[0]["change"] == change
-    assert "change" in snapshots[0]
-
-
-def test_append_snapshot_without_change_defaults_empty(storage_module):
-    salt = crypto_utils.generate_salt()
-    key = crypto_utils.derive_key_argon2id("pw", salt)
-    snapshots = storage_module.append_snapshot([], [{"name": "a"}], {}, key, "2026-01-01 00:00:00")
-    assert snapshots[0]["change"] == {}
-
-
-def test_load_snapshot_returns_change(storage_module):
-    path = str(Path(storage_module.get_app_dir()) / "v.kgvault")
-    key, salt, kdf_spec = _make_vault(storage_module, path, "secret", [{"name": "v1", "password": "1"}])
-    change = {"abc": ["name"]}
-    snapshots = storage_module.append_snapshot([], [{"name": "v1"}], {}, key, "2026-01-01 00:00:00", change=change)
-    storage_module.save_vault(path, [{"name": "v2"}], {}, key, salt, kdf_spec, snapshots=snapshots)
-    entries, prefs, loaded_change = storage_module.load_snapshot(path, 0, key)
-    assert entries[0]["name"] == "v1"
-    assert loaded_change == change
-
-
-def test_save_vault_without_snapshots_argument_preserves_history(storage_module):
-    path = str(Path(storage_module.get_app_dir()) / "v.kgvault")
-    key, salt, kdf_spec = _make_vault(storage_module, path, "secret", [{"id": "x", "name": "v1"}])
-    snapshots = storage_module.append_snapshot(
-        [], [{"id": "x", "name": "v1"}], {}, key, "2026-01-01 00:00:00"
-    )
-    storage_module.save_vault(
-        path, [{"id": "x", "name": "v2"}], {}, key, salt, kdf_spec, snapshots=snapshots
-    )
-
-    storage_module.save_vault(
-        path, [{"id": "x", "name": "v3"}], {}, key, salt, kdf_spec
-    )
-    _, _, _, _, _, loaded_snapshots = storage_module.load_vault(path, "secret")
-    assert len(loaded_snapshots) == 1
-    entries, _, _ = storage_module.load_snapshot(path, 0, key)
-    assert entries[0]["name"] == "v1"
-
-
-def test_reencrypt_snapshots_switches_key_and_preserves_change(storage_module):
-    old_salt = crypto_utils.generate_salt()
-    old_key = crypto_utils.derive_key_argon2id("old", old_salt)
-    new_salt = crypto_utils.generate_salt()
-    new_key = crypto_utils.derive_key_argon2id("new", new_salt)
-    change = {"x": ["name"]}
-    snapshots = storage_module.append_snapshot(
-        [], [{"id": "x", "name": "v1"}], {}, old_key,
-        "2026-01-01 00:00:00", change=change,
-    )
-
-    converted = storage_module.reencrypt_snapshots(snapshots, old_key, new_key)
-    assert converted[0]["change"] == change
-    payload = storage_module._decrypt_payload(converted[0]["data"], new_key)
-    assert payload["entries"][0]["name"] == "v1"
-    with pytest.raises(storage_module.VaultError):
-        storage_module._decrypt_payload(converted[0]["data"], old_key)
-
-
-def test_snapshot_matches_detects_content_and_preference_changes(storage_module):
-    salt = crypto_utils.generate_salt()
-    key = crypto_utils.derive_key_argon2id("pw", salt)
-    entries = [{"id": "x", "name": "v1"}]
-    preferences = {"language": "zh", "auto_lock_minutes": 0, "column_widths": []}
-    snapshot = storage_module.append_snapshot(
-        [], entries, preferences, key, "2026-01-01 00:00:00"
-    )[0]
-
-    assert storage_module.snapshot_matches(snapshot, entries, preferences, key) is True
-    assert storage_module.snapshot_matches(
-        snapshot, [{"id": "x", "name": "v2"}], preferences, key
-    ) is False
-    assert storage_module.snapshot_matches(
-        snapshot, entries, {**preferences, "language": "en"}, key
-    ) is False
-
-
 def test_write_error_log_contains_diagnostics_without_vault_data(storage_module, monkeypatch, tmp_path):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     log_path = storage_module.write_error_log(
@@ -491,22 +281,30 @@ def test_write_error_log_contains_diagnostics_without_vault_data(storage_module,
     assert "password" not in content.lower()
 
 
-def test_load_snapshot_legacy_without_change_returns_empty(storage_module):
-    """旧快照无 change 字段时返回空 dict，兼容。"""
-    path = str(Path(storage_module.get_app_dir()) / "v.kgvault")
-    key, salt, kdf_spec = _make_vault(storage_module, path, "secret", [])
-    # 手工构造无 change 字段的快照
-    from cryptography.fernet import Fernet
-    import json as _json
-    enc = Fernet(key).encrypt(_json.dumps({"entries": [], "preferences": {}}).encode()).hex()
-    raw_snap = {"timestamp": "2026-01-01 00:00:00", "data": enc}  # 无 change
+def test_load_vault_ignores_existing_snapshots_field(storage_module):
+    """旧 vault 中含有 snapshots 数组时，load_vault 正常忽略它并解密 entries。"""
+    path = str(Path(storage_module.get_app_dir()) / "old_vault.kgvault")
+    key, salt, kdf_spec = _make_vault(storage_module, path, "secret", [{"name": "v1"}])
     with open(path, "r", encoding="utf-8") as f:
-        container = _json.load(f)
-    container["snapshots"] = [raw_snap]
+        container = json.load(f)
+    container["snapshots"] = [{"timestamp": "2026-01-01 00:00:00", "data": "dummy"}]
     with open(path, "w", encoding="utf-8") as f:
-        _json.dump(container, f)
-    entries, prefs, loaded_change = storage_module.load_snapshot(path, 0, key)
-    assert loaded_change == {}
+        json.dump(container, f)
+    entries, prefs, k2, s2, kdf2 = storage_module.load_vault(path, "secret")
+    assert entries[0]["name"] == "v1"
+    assert k2 == key
+
+
+def test_save_vault_atomic_in_place(storage_module):
+    """保存 vault 直接原子替换原文件路径。"""
+    path = str(Path(storage_module.get_app_dir()) / "test.kgvault")
+    key, salt, kdf_spec = _make_vault(storage_module, path, "secret", [{"name": "item1"}])
+    assert Path(path).exists()
+    # 再次保存
+    storage_module.save_vault(path, [{"name": "item2"}], {}, key, salt, kdf_spec)
+    entries, _, _, _, _ = storage_module.load_vault(path, "secret")
+    assert len(entries) == 1
+    assert entries[0]["name"] == "item2"
 
 
 def test_migrate_legacy_generates_entry_ids(storage_module):
@@ -520,5 +318,5 @@ def test_migrate_legacy_generates_entry_ids(storage_module):
 
     target = str(Path(storage_module.get_app_dir()) / "migrated.kgvault")
     storage_module.migrate_legacy_passwords_json(str(legacy_pw), None, target, "secret")
-    entries, prefs, k, s, kdf, snaps = storage_module.load_vault(target, "secret")
+    entries, prefs, k, s, kdf = storage_module.load_vault(target, "secret")
     assert entries[0]["id"]  # 迁移后应有 id

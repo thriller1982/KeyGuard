@@ -15,11 +15,7 @@ import crypto_utils
 VAULT_MAGIC = "KGVLT"
 VAULT_VERSION = 3
 VAULT_EXT = ".kgvault"
-SNAPSHOT_LIMIT = 10
 VAULT_BASENAME = f"KeyGuard{VAULT_EXT}"
-VAULT_TIMESTAMP_PREFIX = "KeyGuard_"
-
-CHANGE_FIELDS = ["name", "url", "username", "password", "category", "notes"]
 
 DEFAULT_PREFERENCES = {
     "language": "zh",
@@ -139,36 +135,6 @@ def ensure_entry_ids(entries):
     return entries, changed
 
 
-def compute_changes(prev_entries, curr_entries):
-    """计算 curr 相对 prev 的字段级变化。
-
-    返回 {entry_id: [field_key, ...]}，只包含有变化的条目。
-    新增条目（prev 中无对应 id）不在结果中（UI 留空）。
-    已删除条目（curr 中无对应 id）忽略。
-    比较字段为 CHANGE_FIELDS，不含 password_history 和 id。
-    """
-    prev_map = {}
-    for e in prev_entries or []:
-        if isinstance(e, dict) and isinstance(e.get("id"), str) and e["id"]:
-            prev_map[e["id"]] = e
-
-    change = {}
-    for curr in curr_entries or []:
-        if not isinstance(curr, dict):
-            continue
-        eid = curr.get("id")
-        if not isinstance(eid, str) or not eid or eid not in prev_map:
-            continue
-        prev = prev_map[eid]
-        changed_fields = []
-        for f in CHANGE_FIELDS:
-            if str(prev.get(f, "")) != str(curr.get(f, "")):
-                changed_fields.append(f)
-        if changed_fields:
-            change[eid] = changed_fields
-    return change
-
-
 def _argon2_kdf_spec(salt: bytes, params: dict | None = None) -> dict:
     p = dict(crypto_utils.DEFAULT_ARGON2_PARAMS)
     if params:
@@ -228,26 +194,6 @@ def _read_vault_container(file_path: str) -> dict:
     return data
 
 
-def _normalized_snapshots(snapshots) -> list:
-    normalized = []
-    if not isinstance(snapshots, list):
-        return normalized
-    for snap in snapshots[:SNAPSHOT_LIMIT]:
-        if not (
-            isinstance(snap, dict)
-            and isinstance(snap.get("timestamp"), str)
-            and isinstance(snap.get("data"), str)
-        ):
-            continue
-        change = snap.get("change", {})
-        if not isinstance(change, dict):
-            change = {}
-        normalized.append(
-            {"timestamp": snap["timestamp"], "data": snap["data"], "change": change}
-        )
-    return normalized
-
-
 def is_vault_file(path: str) -> bool:
     """快速判断 path 是否为 KeyGuard vault 文件（检查 magic 字段）。"""
     try:
@@ -259,7 +205,7 @@ def is_vault_file(path: str) -> bool:
 
 
 def _parse_vault_container(data: dict, password: str):
-    """解析 v3 vault 容器，返回 (entries, prefs, key, salt, kdf_spec, snapshots)。"""
+    """解析 v3 vault 容器，返回 (entries, prefs, key, salt, kdf_spec)。"""
     if data.get("magic") != VAULT_MAGIC:
         raise VaultError("unsupported_format")
     version = data.get("version")
@@ -279,21 +225,11 @@ def _parse_vault_container(data: dict, password: str):
     entries = _normalize_entries(payload.get("entries", []))
     prefs = _with_preferences_defaults(payload.get("preferences", {}))
 
-    snapshots_raw = data.get("snapshots", [])
-    snapshots = []
-    if isinstance(snapshots_raw, list):
-        for snap in snapshots_raw:
-            if isinstance(snap, dict) and isinstance(snap.get("timestamp"), str) and isinstance(snap.get("data"), str):
-                ch = snap.get("change", {})
-                if not isinstance(ch, dict):
-                    ch = {}
-                snapshots.append({"timestamp": snap["timestamp"], "data": snap["data"], "change": ch})
-
-    return entries, prefs, key, salt, kdf_spec, snapshots
+    return entries, prefs, key, salt, kdf_spec
 
 
 def _parse_vault_container_by_key(data: dict, key: bytes):
-    """用已派生的 key 解析 v3 容器，返回 (entries, prefs, key, salt, kdf_spec, snapshots)。"""
+    """用已派生的 key 解析 v3 容器，返回 (entries, prefs, key, salt, kdf_spec)。"""
     if data.get("magic") != VAULT_MAGIC:
         raise VaultError("unsupported_format")
     if data.get("version") != VAULT_VERSION:
@@ -315,21 +251,11 @@ def _parse_vault_container_by_key(data: dict, key: bytes):
     entries = _normalize_entries(payload.get("entries", []))
     prefs = _with_preferences_defaults(payload.get("preferences", {}))
 
-    snapshots_raw = data.get("snapshots", [])
-    snapshots = []
-    if isinstance(snapshots_raw, list):
-        for snap in snapshots_raw:
-            if isinstance(snap, dict) and isinstance(snap.get("timestamp"), str) and isinstance(snap.get("data"), str):
-                ch = snap.get("change", {})
-                if not isinstance(ch, dict):
-                    ch = {}
-                snapshots.append({"timestamp": snap["timestamp"], "data": snap["data"], "change": ch})
-
-    return entries, prefs, key, salt, kdf_spec, snapshots
+    return entries, prefs, key, salt, kdf_spec
 
 
 def load_vault(path: str, password: str):
-    """读取并解密 v3 vault。返回 (entries, preferences, key, salt, kdf_spec, snapshots)。"""
+    """读取并解密 v3 vault。返回 (entries, preferences, key, salt, kdf_spec)。"""
     if not os.path.exists(path):
         raise VaultError("missing_file")
     data = _read_vault_container(path)
@@ -337,15 +263,15 @@ def load_vault(path: str, password: str):
 
 
 def load_vault_by_key(path: str, key: bytes):
-    """用已派生的 key 直接解密 v3 vault。返回 (entries, preferences, key, salt, kdf_spec, snapshots)。"""
+    """用已派生的 key 直接解密 v3 vault。返回 (entries, preferences, key, salt, kdf_spec)。"""
     if not os.path.exists(path):
         raise VaultError("missing_file")
     data = _read_vault_container(path)
     return _parse_vault_container_by_key(data, key)
 
 
-def save_vault(path: str, entries: list, preferences: dict, key: bytes, salt: bytes, kdf_spec: dict, snapshots: list | None = None):
-    """加密后保存 vault（v3 格式）。snapshots 可选，缺省保留已有快照。"""
+def save_vault(path: str, entries: list, preferences: dict, key: bytes, salt: bytes, kdf_spec: dict):
+    """加密后保存 vault（v3 格式）。"""
     normalized_entries = _normalize_entries(entries)
     prefs = _with_preferences_defaults(preferences)
 
@@ -355,21 +281,11 @@ def save_vault(path: str, entries: list, preferences: dict, key: bytes, salt: by
     spec = dict(kdf_spec)
     spec["salt"] = salt.hex()
 
-    if snapshots is None and os.path.exists(path):
-        try:
-            snapshots = _read_vault_container(path).get("snapshots", [])
-        except VaultError as exc:
-            raise PasswordSaveError(
-                "preserve_snapshots_failed", detail=str(exc)
-            ) from exc
-    snaps_out = _normalized_snapshots(snapshots or [])
-
     container = {
         "magic": VAULT_MAGIC,
         "version": VAULT_VERSION,
         "kdf": spec,
         "data": encrypted_hex,
-        "snapshots": snaps_out,
     }
 
     tmp = path + ".tmp"
@@ -407,91 +323,8 @@ def create_new_vault(path: str, password: str, preferences: dict | None = None) 
     kdf_spec = _argon2_kdf_spec(salt)
     key = crypto_utils.derive_key_for_kdf(password, salt, kdf_spec)
     prefs = _with_preferences_defaults(preferences or {})
-    save_vault(path, [], prefs, key, salt, kdf_spec, snapshots=[])
+    save_vault(path, [], prefs, key, salt, kdf_spec)
     return key, salt, kdf_spec
-
-
-def append_snapshot(
-    snapshots: list,
-    entries: list,
-    preferences: dict,
-    key: bytes,
-    timestamp: str,
-    change: dict | None = None,
-) -> list:
-    """把当前 entries+preferences 作为新快照加密后追加到 snapshots 列表前部。
-
-    change 是 {entry_id: [field_keys]} 字典，存入快照结构供 UI 展示。
-    超过 SNAPSHOT_LIMIT 时丢弃最老的。返回新列表。
-    """
-    payload = {
-        "entries": _normalize_entries(entries),
-        "preferences": _with_preferences_defaults(preferences),
-    }
-    encrypted_hex = _encrypt_payload(payload, key)
-    new_snap = {
-        "timestamp": timestamp,
-        "data": encrypted_hex,
-        "change": change if isinstance(change, dict) else {},
-    }
-    new_list = [new_snap] + list(snapshots or [])
-    return new_list[:SNAPSHOT_LIMIT]
-
-
-def snapshot_matches(snapshot: dict, entries: list, preferences: dict, key: bytes) -> bool:
-    """判断一份快照是否与当前完整 payload 相同。"""
-    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("data"), str):
-        return False
-    payload = _decrypt_payload(snapshot["data"], key)
-    return (
-        _normalize_entries(payload.get("entries", [])) == _normalize_entries(entries)
-        and _with_preferences_defaults(payload.get("preferences", {}))
-        == _with_preferences_defaults(preferences)
-    )
-
-
-def payloads_match(entries_a: list, preferences_a: dict, entries_b: list, preferences_b: dict) -> bool:
-    """比较两份未加密 payload 的规范化内容。"""
-    return (
-        _normalize_entries(entries_a) == _normalize_entries(entries_b)
-        and _with_preferences_defaults(preferences_a)
-        == _with_preferences_defaults(preferences_b)
-    )
-
-
-def reencrypt_snapshots(snapshots: list, old_key: bytes, new_key: bytes) -> list:
-    """用新密钥重新加密全部快照；任一快照失败时不返回部分结果。"""
-    reencrypted = []
-    for snap in _normalized_snapshots(snapshots):
-        payload = _decrypt_payload(snap["data"], old_key)
-        reencrypted.append(
-            {
-                "timestamp": snap["timestamp"],
-                "data": _encrypt_payload(payload, new_key),
-                "change": snap["change"],
-            }
-        )
-    return reencrypted
-
-
-def load_snapshot(path: str, snapshot_index: int, key: bytes):
-    """解密指定历史快照。返回 (entries, preferences, change)。"""
-    data = _read_vault_container(path)
-    if data.get("magic") != VAULT_MAGIC or data.get("version") != VAULT_VERSION:
-        raise VaultError("unsupported_version")
-    snapshots = data.get("snapshots", [])
-    if not isinstance(snapshots, list) or snapshot_index < 0 or snapshot_index >= len(snapshots):
-        raise VaultError("snapshot_not_found")
-    snap = snapshots[snapshot_index]
-    if not isinstance(snap, dict) or not isinstance(snap.get("data"), str):
-        raise VaultError("snapshot_not_found")
-    payload = _decrypt_payload(snap["data"], key)
-    entries = _normalize_entries(payload.get("entries", []))
-    prefs = _with_preferences_defaults(payload.get("preferences", {}))
-    change = snap.get("change", {})
-    if not isinstance(change, dict):
-        change = {}
-    return entries, prefs, change
 
 
 def scan_vaults_in_dir(directory: str) -> list:
@@ -503,38 +336,6 @@ def scan_vaults_in_dir(directory: str) -> list:
     files = [f for f in files if is_vault_file(f)]
     files.sort(key=lambda p: os.path.getmtime(p))
     return files
-
-
-def compute_closed_vault_path(vault_path: str, file_stamp: str | None = None) -> str:
-    """根据关闭时刻计算带时间戳的新 vault 文件名。
-
-    file_stamp 缺省取当前时间，格式 YYYYMMDD_HHMMSS。
-    返回与 vault_path 同目录的 KeyGuard_<stamp>.kgvault。
-    """
-    if file_stamp is None:
-        file_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    directory = os.path.dirname(os.path.abspath(vault_path)) or "."
-    return os.path.join(directory, f"{VAULT_TIMESTAMP_PREFIX}{file_stamp}{VAULT_EXT}")
-
-
-def remove_previous_managed_vault(previous_path: str, keep_path: str) -> bool:
-    """仅删除本次关闭前明确打开的 KeyGuard 受管文件。"""
-    previous_abs = os.path.abspath(previous_path)
-    keep_abs = os.path.abspath(keep_path)
-    if previous_abs == keep_abs or not os.path.exists(previous_abs):
-        return False
-    if os.path.dirname(previous_abs) != os.path.dirname(keep_abs):
-        return False
-
-    name = os.path.basename(previous_abs)
-    is_managed = name == VAULT_BASENAME or (
-        name.startswith(VAULT_TIMESTAMP_PREFIX) and name.endswith(VAULT_EXT)
-    )
-    if not is_managed:
-        return False
-
-    os.remove(previous_abs)
-    return True
 
 
 def write_error_log(operation: str, exc: Exception, **context) -> str | None:
@@ -631,7 +432,7 @@ def migrate_legacy_passwords_json(
     new_salt = crypto_utils.generate_salt()
     new_kdf_spec = _argon2_kdf_spec(new_salt)
     new_key = crypto_utils.derive_key_for_kdf(password, new_salt, new_kdf_spec)
-    save_vault(target_path, entries, prefs, new_key, new_salt, new_kdf_spec, snapshots=[])
+    save_vault(target_path, entries, prefs, new_key, new_salt, new_kdf_spec)
 
     for old in (legacy_passwords_path, legacy_config_path):
         if old and os.path.exists(old):

@@ -67,8 +67,8 @@ def get_resource_path(relative_path):
 class DragSelectTableWidget(QTableWidget):
     """支持从空白区域开始拖选行并自适应列宽的表格。"""
 
-    MIN_COLUMN_WIDTHS = [80, 100, 80, 80, 60, 80, 60]
-    DEFAULT_COLUMN_WEIGHTS = [16, 22, 16, 12, 10, 14, 10]
+    MIN_COLUMN_WIDTHS = [80, 100, 80, 80, 60, 80]
+    DEFAULT_COLUMN_WEIGHTS = [18, 26, 18, 14, 10, 14]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -176,7 +176,7 @@ class DragSelectTableWidget(QTableWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, vault_path, entries, preferences, master_key, master_salt, kdf_spec, snapshots=None):
+    def __init__(self, vault_path, entries, preferences, master_key, master_salt, kdf_spec):
         super().__init__()
         self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
         self.setWindowIcon(QIcon(get_resource_path("icon.ico")))
@@ -187,12 +187,7 @@ class MainWindow(QMainWindow):
         self.master_key = master_key
         self.master_salt = master_salt
         self.kdf_spec = kdf_spec
-        self.snapshots = snapshots or []
         self._dirty = False
-        self._viewing_snapshot = False
-        self._latest_cache = None
-        self._current_changes = {}
-        self._latest_changes = {}
         self._last_totp_secret = ""
 
         # 为缺少 id 的条目补生成 id；若有改动立即落盘作为基线
@@ -202,16 +197,9 @@ class MainWindow(QMainWindow):
                 storage.save_vault(
                     self.vault_path, self.passwords, self.preferences,
                     self.master_key, self.master_salt, self.kdf_spec,
-                    snapshots=self.snapshots,
                 )
             except Exception:
                 pass
-
-        self._snapshot_session_baseline = (
-            copy.deepcopy(self.passwords),
-            copy.deepcopy(self.preferences),
-        )
-        self._recompute_latest_changes()
 
         self.idle_timer = QTimer()
         self.idle_timer.timeout.connect(self.check_idle)
@@ -225,35 +213,9 @@ class MainWindow(QMainWindow):
         self.setup_ui()
         self.apply_auto_lock_settings()
         self.refresh_table()
-        self.refresh_version_combo()
 
     def mark_dirty(self):
         self._dirty = True
-
-    def _entries_for_latest(self):
-        if self._viewing_snapshot and self._latest_cache is not None:
-            return self._latest_cache
-        return self.passwords
-
-    def _recompute_latest_changes(self, latest_entries=None):
-        """重算最新版相对最近一份历史快照的字段变化。"""
-        if latest_entries is None:
-            latest_entries = self._entries_for_latest()
-        latest_changes = {}
-        if self.snapshots:
-            try:
-                prev_entries, _, _ = storage.load_snapshot(
-                    self.vault_path, 0, self.master_key
-                )
-                latest_changes = storage.compute_changes(
-                    prev_entries, latest_entries
-                )
-            except Exception:
-                latest_changes = {}
-
-        self._latest_changes = latest_changes
-        if not self._viewing_snapshot:
-            self._current_changes = latest_changes
 
     def save_preferences(self, prefs):
         self.preferences = dict(prefs)
@@ -263,12 +225,11 @@ class MainWindow(QMainWindow):
         try:
             storage.save_vault(
                 self.vault_path,
-                self._entries_for_latest(),
+                self.passwords,
                 self.preferences,
                 self.master_key,
                 self.master_salt,
                 self.kdf_spec,
-                snapshots=self.snapshots,
             )
             self._dirty = False
             return True
@@ -370,10 +331,6 @@ class MainWindow(QMainWindow):
         self.open_btn = QPushButton()
         self.open_btn.clicked.connect(self.open_vault)
         batch_layout.addWidget(self.open_btn)
-
-        self.version_combo = QComboBox()
-        self.version_combo.currentIndexChanged.connect(self.on_version_changed)
-        batch_layout.addWidget(self.version_combo)
         batch_layout.addStretch()
 
         top_grid.addWidget(batch_widget, 1, 0)
@@ -384,7 +341,7 @@ class MainWindow(QMainWindow):
 
         self.main_layout.addLayout(top_grid)
 
-        self.table = DragSelectTableWidget(0, 7)
+        self.table = DragSelectTableWidget(0, 6)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -397,7 +354,7 @@ class MainWindow(QMainWindow):
         config = self.preferences
         col_widths = config.get("column_widths", [])
         for i, w in enumerate(col_widths):
-            if i < 7:
+            if i < 6:
                 self.table.setColumnWidth(i, w)
 
         self.table.viewport().installEventFilter(self)
@@ -425,81 +382,37 @@ class MainWindow(QMainWindow):
         self.retranslate_ui()
 
     def closeEvent(self, event):
-        self.preferences["column_widths"] = [self.table.columnWidth(i) for i in range(7)]
-        entries_to_save = self._entries_for_latest()
-        previous_path = self.vault_path
+        current_widths = [self.table.columnWidth(i) for i in range(6)]
+        widths_changed = self.preferences.get("column_widths") != current_widths
+        self.preferences["column_widths"] = current_widths
+        if not self._dirty and not widths_changed:
+            event.accept()
+            return
+
         try:
-            if self.snapshots:
-                unchanged = storage.snapshot_matches(
-                    self.snapshots[0], entries_to_save, self.preferences, self.master_key
-                )
-            else:
-                baseline_entries, baseline_preferences = self._snapshot_session_baseline
-                unchanged = storage.payloads_match(
-                    baseline_entries,
-                    baseline_preferences,
-                    entries_to_save,
-                    self.preferences,
-                )
-
-            if unchanged:
-                event.accept()
-                return
-
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            file_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            # 计算相对上一版的字段级变化
-            prev_entries = []
-            if self.snapshots:
-                try:
-                    prev_entries, _, _ = storage.load_snapshot(self.vault_path, 0, self.master_key)
-                except Exception:
-                    prev_entries = []
-            change = storage.compute_changes(prev_entries, entries_to_save)
-            new_snapshots = storage.append_snapshot(
-                self.snapshots, entries_to_save, self.preferences, self.master_key, timestamp, change=change
-            )
-            new_path = storage.compute_closed_vault_path(self.vault_path, file_stamp)
             storage.save_vault(
-                new_path, entries_to_save, self.preferences,
-                self.master_key, self.master_salt, self.kdf_spec, snapshots=new_snapshots,
+                self.vault_path,
+                self.passwords,
+                self.preferences,
+                self.master_key,
+                self.master_salt,
+                self.kdf_spec,
             )
-            self.vault_path = new_path
-            self.snapshots = new_snapshots
             self._dirty = False
-            try:
-                storage.remove_previous_managed_vault(previous_path, new_path)
-            except OSError as cleanup_exc:
-                log_path = storage.write_error_log(
-                    "close_cleanup",
-                    cleanup_exc,
-                    previous_path=previous_path,
-                    saved_path=new_path,
-                )
-                MsgBox.warning(
-                    self,
-                    i18n._t("error_title"),
-                    i18n._t("vault_cleanup_warning").format(
-                        old_path=previous_path,
-                        new_path=new_path,
-                        error=str(cleanup_exc),
-                        log_path=log_path or "-",
-                    ),
-                )
         except Exception as exc:
             recovery_path = getattr(exc, "recovery_path", None)
             detail = getattr(exc, "detail", "") or str(exc)
             log_path = storage.write_error_log(
                 "close_save",
                 exc,
-                vault_path=previous_path,
+                vault_path=self.vault_path,
                 recovery_path=recovery_path,
             )
             MsgBox.critical(
                 self,
                 i18n._t("error_title"),
                 i18n._t("vault_close_save_failed").format(
-                    original_path=previous_path,
+                    original_path=self.vault_path,
                     recovery_path=recovery_path or "-",
                     error=detail,
                     log_path=log_path or "-",
@@ -524,7 +437,6 @@ class MainWindow(QMainWindow):
 
         self.new_btn.setText(i18n._t("vault_new_btn"))
         self.open_btn.setText(i18n._t("vault_open_btn"))
-        self._refresh_version_combo_texts()
 
         self.category_filter.setItemText(0, i18n._t("category_all"))
         self.category_filter.setItemText(1, i18n._t("category_website"))
@@ -548,7 +460,6 @@ class MainWindow(QMainWindow):
             i18n._t("table_password"),
             i18n._t("table_category"),
             i18n._t("table_notes"),
-            i18n._t("table_change"),
         ]
         self.table.setHorizontalHeaderLabels(headers)
 
@@ -561,22 +472,6 @@ class MainWindow(QMainWindow):
             "other": i18n._t("category_other"),
         }
         return category_map.get(category, category)
-
-    _CHANGE_FIELD_LABELS = {
-        "name": "table_name",
-        "url": "table_url",
-        "username": "table_username",
-        "password": "table_password",
-        "category": "table_category",
-        "notes": "table_notes",
-    }
-
-    def _format_change_text(self, entry_id: str) -> str:
-        fields = self._current_changes.get(entry_id)
-        if not fields:
-            return ""
-        labels = [i18n._t(self._CHANGE_FIELD_LABELS.get(f, f)) for f in fields]
-        return ",".join(labels)
 
     def refresh_table(self):
         self.table.setRowCount(0)
@@ -606,7 +501,6 @@ class MainWindow(QMainWindow):
                 QTableWidgetItem(self.get_category_text(entry.get("category", "other"))),
             )
             self.table.setItem(row, 5, QTableWidgetItem(entry.get("notes", "")))
-            self.table.setItem(row, 6, QTableWidgetItem(self._format_change_text(entry.get("id", ""))))
             self.table.item(row, 0).setData(Qt.UserRole, i)
 
         total = len(self.passwords)
@@ -622,8 +516,6 @@ class MainWindow(QMainWindow):
 
     def add_entry(self):
         self.reset_idle_timer()
-        if self._viewing_snapshot:
-            return
         dialog = EntryDialog(self)
         if dialog.exec():
             data = dialog.get_data()
@@ -633,8 +525,6 @@ class MainWindow(QMainWindow):
 
     def edit_entry(self):
         self.reset_idle_timer()
-        if self._viewing_snapshot:
-            return
         row = self.table.currentRow()
         if row < 0:
             selected = self.table.selectedRanges()
@@ -675,8 +565,6 @@ class MainWindow(QMainWindow):
 
     def delete_entry(self):
         self.reset_idle_timer()
-        if self._viewing_snapshot:
-            return
         selected_rows = set()
         for r in self.table.selectedRanges():
             for i in range(r.topRow(), r.bottomRow() + 1):
@@ -719,8 +607,6 @@ class MainWindow(QMainWindow):
 
     def show_context_menu(self, pos):
         self.reset_idle_timer()
-        if self._viewing_snapshot:
-            return
         row = self.table.rowAt(pos.y())
         if row < 0:
             return
@@ -760,8 +646,6 @@ class MainWindow(QMainWindow):
 
     def import_data(self):
         self.reset_idle_timer()
-        if self._viewing_snapshot:
-            return
 
         format_dialog = QDialog(self)
         format_dialog.setWindowTitle(i18n._t("import_format"))
@@ -1056,23 +940,19 @@ class MainWindow(QMainWindow):
             json.dump(self.passwords, f, indent=2, ensure_ascii=False)
 
     def save_and_refresh(self):
-        if self._viewing_snapshot:
-            return False
         try:
             storage.save_vault(
                 self.vault_path,
-                self._entries_for_latest(),
+                self.passwords,
                 self.preferences,
                 self.master_key,
                 self.master_salt,
                 self.kdf_spec,
-                snapshots=self.snapshots,
             )
             self._dirty = False
         except Exception:
             MsgBox.critical(self, i18n._t("error_title"), i18n._t("storage_save_failed"))
             return False
-        self._recompute_latest_changes()
         self.refresh_table()
         return True
 
@@ -1099,23 +979,18 @@ class MainWindow(QMainWindow):
             self.master_key, self.master_salt, self.kdf_spec, self
         )
         if dialog.exec():
-            entries_to_save = self._entries_for_latest()
             new_password = dialog.get_new_password()
             new_salt = crypto_utils.generate_salt()
             new_kdf_spec = storage._argon2_kdf_spec(new_salt)
             new_key = crypto_utils.derive_key_for_kdf(new_password, new_salt, new_kdf_spec)
             try:
-                new_snapshots = storage.reencrypt_snapshots(
-                    self.snapshots, self.master_key, new_key
-                )
                 storage.save_vault(
                     self.vault_path,
-                    entries_to_save,
+                    self.passwords,
                     self.preferences,
                     new_key,
                     new_salt,
                     new_kdf_spec,
-                    snapshots=new_snapshots,
                 )
             except Exception as exc:
                 recovery_path = getattr(exc, "recovery_path", None)
@@ -1140,9 +1015,7 @@ class MainWindow(QMainWindow):
             self.master_key = new_key
             self.master_salt = new_salt
             self.kdf_spec = new_kdf_spec
-            self.snapshots = new_snapshots
             self._dirty = False
-            self._recompute_latest_changes(entries_to_save)
             self.refresh_table()
             MsgBox.information(
                 self, i18n._t("change_pass_title"), i18n._t("change_pass_success")
@@ -1184,22 +1057,11 @@ class MainWindow(QMainWindow):
             return
         self.vault_path = path
         self.passwords = []
-        self.snapshots = []
         self.master_key = key
         self.master_salt = salt
         self.kdf_spec = kdf_spec
         self._dirty = False
-        self._viewing_snapshot = False
-        self._latest_cache = None
-        self._latest_changes = {}
-        self._current_changes = {}
-        self._snapshot_session_baseline = (
-            copy.deepcopy(self.passwords),
-            copy.deepcopy(self.preferences),
-        )
-        self._set_readonly(False)
         self.refresh_table()
-        self.refresh_version_combo()
         self.statusBar().showMessage(i18n._t("vault_created"), 3000)
 
     def open_vault(self):
@@ -1226,7 +1088,7 @@ class MainWindow(QMainWindow):
                 return
             pwd = dialog.get_password()
             try:
-                entries, prefs, key, salt, kdf_spec, snapshots = storage.load_vault(path, pwd)
+                entries, prefs, key, salt, kdf_spec = storage.load_vault(path, pwd)
             except storage.VaultError as exc:
                 if exc.reason == "wrong_password":
                     MsgBox.warning(self, i18n._t("error_title"), i18n._t("decrypt_error"))
@@ -1242,93 +1104,10 @@ class MainWindow(QMainWindow):
             self.master_key = key
             self.master_salt = salt
             self.kdf_spec = kdf_spec
-            self.snapshots = snapshots
             self._dirty = False
-            self._viewing_snapshot = False
-            self._latest_cache = None
-            self._snapshot_session_baseline = (
-                copy.deepcopy(self.passwords),
-                copy.deepcopy(self.preferences),
-            )
-            self._recompute_latest_changes()
-            self._set_readonly(False)
             self.refresh_table()
-            self.refresh_version_combo()
             self.statusBar().showMessage(i18n._t("vault_opened"), 3000)
             return
-
-    def refresh_version_combo(self):
-        """刷新版本下拉框：第 0 项=最新版，后续=历史快照时间戳。"""
-        if not hasattr(self, "version_combo"):
-            return
-        self.version_combo.blockSignals(True)
-        self.version_combo.clear()
-        self.version_combo.addItem(i18n._t("version_latest"), -1)
-        for i, snap in enumerate(self.snapshots):
-            self.version_combo.addItem(snap.get("timestamp", f"#{i}"), i)
-        self.version_combo.blockSignals(False)
-        self.version_combo.setCurrentIndex(0)
-
-    def _refresh_version_combo_texts(self):
-        """语言切换时更新下拉框文案（不重建条目）。"""
-        if not hasattr(self, "version_combo"):
-            return
-        if self.version_combo.count() > 0:
-            self.version_combo.setItemText(0, i18n._t("version_latest"))
-
-    def on_version_changed(self, index):
-        if index < 0:
-            return
-        snap_idx = self.version_combo.itemData(index)
-        if snap_idx == -1 or snap_idx is None:
-            # 切回最新版
-            if self._viewing_snapshot and self._latest_cache is not None:
-                self.passwords = self._latest_cache
-                self._latest_cache = None
-            self._viewing_snapshot = False
-            self._current_changes = self._latest_changes
-            self._set_readonly(False)
-            self.refresh_table()
-            return
-        # 切到历史快照
-        if self._dirty and not self._viewing_snapshot:
-            reply = MsgBox.question(
-                self,
-                i18n._t("vault_picker_title"),
-                i18n._t("confirm_switch_vault"),
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                self.version_combo.blockSignals(True)
-                self.version_combo.setCurrentIndex(0)
-                self.version_combo.blockSignals(False)
-                return
-        try:
-            entries, prefs, change = storage.load_snapshot(self.vault_path, snap_idx, self.master_key)
-        except storage.VaultError:
-            MsgBox.warning(self, i18n._t("error_title"), i18n._t("snapshot_load_failed"))
-            self.version_combo.blockSignals(True)
-            self.version_combo.setCurrentIndex(0)
-            self.version_combo.blockSignals(False)
-            return
-        if not self._viewing_snapshot:
-            self._latest_cache = self.passwords
-        self.passwords = entries
-        self._current_changes = change
-        self._viewing_snapshot = True
-        self._set_readonly(True)
-        self.refresh_table()
-
-    def _set_readonly(self, readonly):
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.add_btn.setEnabled(not readonly)
-        self.delete_btn.setEnabled(not readonly)
-        self.import_btn.setEnabled(not readonly)
-        if hasattr(self, "add_shortcut"):
-            self.add_shortcut.setEnabled(not readonly)
-        if hasattr(self, "delete_shortcut"):
-            self.delete_shortcut.setEnabled(not readonly)
 
 
 def detect_system_language():
@@ -1351,7 +1130,7 @@ def _resolve_initial_vault_path(argv):
 
 
 def _try_open_vault_for_startup(path, parent=None):
-    """启动时尝试打开 vault 文件。返回 (entries, prefs, key, salt, kdf_spec, snapshots) 或 None。"""
+    """启动时尝试打开 vault 文件。返回 (entries, prefs, key, salt, kdf_spec) 或 None。"""
     if not storage.is_vault_file(path):
         MsgBox.warning(parent, i18n._t("vault_open_error_title"), i18n._t("vault_format_unsupported"))
         return None
@@ -1374,7 +1153,7 @@ def _try_open_vault_for_startup(path, parent=None):
 
 
 def _create_vault_for_startup(path, parent=None):
-    """启动时新建 vault。返回 (entries, prefs, key, salt, kdf_spec, snapshots) 或 None。"""
+    """启动时新建 vault。返回 (entries, prefs, key, salt, kdf_spec) 或 None。"""
     while True:
         dialog = AuthDialog("setup", parent)
         if not dialog.exec():
@@ -1382,7 +1161,7 @@ def _create_vault_for_startup(path, parent=None):
         pwd = dialog.get_password()
         try:
             key, salt, kdf_spec = storage.create_new_vault(path, pwd)
-            return [], storage.DEFAULT_PREFERENCES.copy(), key, salt, kdf_spec, []
+            return [], storage.DEFAULT_PREFERENCES.copy(), key, salt, kdf_spec
         except Exception:
             MsgBox.critical(parent, i18n._t("vault_create_error_title"), i18n._t("vault_save_failed"))
             return None
@@ -1391,7 +1170,7 @@ def _create_vault_for_startup(path, parent=None):
 def _migrate_legacy_for_startup(legacy_info, parent=None):
     """启动时迁移旧版 passwords.json → v3 .kgvault。
 
-    返回 (vault_path, entries, prefs, key, salt, kdf_spec, snapshots) 或 None。
+    返回 (vault_path, entries, prefs, key, salt, kdf_spec) 或 None。
     迁移成功后清理旧 data/ 目录和根目录旧文件。
     """
     while True:
@@ -1419,7 +1198,7 @@ def _migrate_legacy_for_startup(legacy_info, parent=None):
             MsgBox.critical(parent, i18n._t("vault_open_error_title"), i18n._t("vault_load_failed"))
             return None
         try:
-            entries, prefs, k2, s2, kdf2, snapshots = storage.load_vault(target_path, pwd)
+            entries, prefs, k2, s2, kdf2 = storage.load_vault(target_path, pwd)
         except storage.VaultError:
             MsgBox.critical(parent, i18n._t("vault_open_error_title"), i18n._t("vault_load_failed"))
             return None
@@ -1430,7 +1209,7 @@ def _migrate_legacy_for_startup(legacy_info, parent=None):
             i18n._t("vault_migrated_title"),
             i18n._t("vault_migrated_msg").format(path=target_path),
         )
-        return target_path, entries, prefs, k2, s2, kdf2, snapshots
+        return target_path, entries, prefs, k2, s2, kdf2
 
 
 def main():
@@ -1467,13 +1246,12 @@ def main():
     master_key = None
     master_salt = None
     kdf_spec = None
-    snapshots = None
 
     if init_vault_path:
         result = _try_open_vault_for_startup(init_vault_path)
         if result is None:
             sys.exit(0)
-        entries, prefs, master_key, master_salt, kdf_spec, snapshots = result
+        entries, prefs, master_key, master_salt, kdf_spec = result
         vault_path = init_vault_path
     else:
         # 优先检测旧 passwords.json，自动迁移
@@ -1482,7 +1260,7 @@ def main():
             migrated = _migrate_legacy_for_startup(legacy_info)
             if migrated is None:
                 sys.exit(0)
-            vault_path, entries, prefs, master_key, master_salt, kdf_spec, snapshots = migrated
+            vault_path, entries, prefs, master_key, master_salt, kdf_spec = migrated
         else:
             # 扫描 EXE 同目录下的 .kgvault 文件
             exe_dir = storage.get_app_dir()
@@ -1491,7 +1269,7 @@ def main():
                 result = _try_open_vault_for_startup(found_vaults[0])
                 if result is None:
                     sys.exit(0)
-                entries, prefs, master_key, master_salt, kdf_spec, snapshots = result
+                entries, prefs, master_key, master_salt, kdf_spec = result
                 vault_path = found_vaults[0]
             else:
                 # 0 个或多于 1 个 → 引导界面
@@ -1503,13 +1281,13 @@ def main():
                     result = _create_vault_for_startup(chosen_path)
                     if result is None:
                         sys.exit(0)
-                    entries, prefs, master_key, master_salt, kdf_spec, snapshots = result
+                    entries, prefs, master_key, master_salt, kdf_spec = result
                     vault_path = chosen_path
                 elif picker.chosen_action == "open":
                     result = _try_open_vault_for_startup(chosen_path)
                     if result is None:
                         sys.exit(0)
-                    entries, prefs, master_key, master_salt, kdf_spec, snapshots = result
+                    entries, prefs, master_key, master_salt, kdf_spec = result
                     vault_path = chosen_path
 
     if lang != prefs.get("language", lang):
@@ -1521,7 +1299,7 @@ def main():
         app._qt_translator.load(f"qt_{locale_name}", translations_path)
         app.installTranslator(app._qt_translator)
 
-    window = MainWindow(vault_path, entries, prefs, master_key, master_salt, kdf_spec, snapshots)
+    window = MainWindow(vault_path, entries, prefs, master_key, master_salt, kdf_spec)
     window.show()
     sys.exit(app.exec())
 
