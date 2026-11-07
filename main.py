@@ -355,8 +355,10 @@ class MainWindow(QMainWindow):
         self.status_label.setAlignment(Qt.AlignCenter)
         self.statusBar().addWidget(self.status_label, 1)
 
-        QShortcut(QKeySequence("Ctrl+N"), self).activated.connect(self.add_entry)
-        QShortcut(QKeySequence("Delete"), self).activated.connect(self.delete_entry)
+        self.add_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
+        self.add_shortcut.activated.connect(self.add_entry)
+        self.delete_shortcut = QShortcut(QKeySequence("Delete"), self)
+        self.delete_shortcut.activated.connect(self.delete_entry)
         QShortcut(QKeySequence("Ctrl+F"), self).activated.connect(self.focus_search)
 
         self.retranslate_ui()
@@ -558,6 +560,8 @@ class MainWindow(QMainWindow):
 
     def add_entry(self):
         self.reset_idle_timer()
+        if self._viewing_snapshot:
+            return
         dialog = EntryDialog(self)
         if dialog.exec():
             data = dialog.get_data()
@@ -567,6 +571,8 @@ class MainWindow(QMainWindow):
 
     def edit_entry(self):
         self.reset_idle_timer()
+        if self._viewing_snapshot:
+            return
         row = self.table.currentRow()
         if row < 0:
             selected = self.table.selectedRanges()
@@ -607,6 +613,8 @@ class MainWindow(QMainWindow):
 
     def delete_entry(self):
         self.reset_idle_timer()
+        if self._viewing_snapshot:
+            return
         selected_rows = set()
         for r in self.table.selectedRanges():
             for i in range(r.topRow(), r.bottomRow() + 1):
@@ -649,6 +657,8 @@ class MainWindow(QMainWindow):
 
     def show_context_menu(self, pos):
         self.reset_idle_timer()
+        if self._viewing_snapshot:
+            return
         row = self.table.rowAt(pos.y())
         if row < 0:
             return
@@ -688,6 +698,8 @@ class MainWindow(QMainWindow):
 
     def import_data(self):
         self.reset_idle_timer()
+        if self._viewing_snapshot:
+            return
 
         format_dialog = QDialog(self)
         format_dialog.setWindowTitle(i18n._t("import_format"))
@@ -982,10 +994,12 @@ class MainWindow(QMainWindow):
             json.dump(self.passwords, f, indent=2, ensure_ascii=False)
 
     def save_and_refresh(self):
+        if self._viewing_snapshot:
+            return False
         try:
             storage.save_vault(
                 self.vault_path,
-                self.passwords,
+                self._entries_for_latest(),
                 self.preferences,
                 self.master_key,
                 self.master_salt,
@@ -1243,6 +1257,10 @@ class MainWindow(QMainWindow):
         self.add_btn.setEnabled(not readonly)
         self.delete_btn.setEnabled(not readonly)
         self.import_btn.setEnabled(not readonly)
+        if hasattr(self, "add_shortcut"):
+            self.add_shortcut.setEnabled(not readonly)
+        if hasattr(self, "delete_shortcut"):
+            self.delete_shortcut.setEnabled(not readonly)
 
 
 def detect_system_language():

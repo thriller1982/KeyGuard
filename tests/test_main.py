@@ -246,3 +246,87 @@ def test_change_master_password_commits_key_only_after_success(monkeypatch):
     assert window.master_salt == new_salt
     assert window.kdf_spec == new_kdf
     assert window.snapshots == new_snapshots
+
+
+def test_save_and_refresh_refuses_while_viewing_snapshot(monkeypatch):
+    historical_entries = [_entry(name="historical")]
+    window = _window_stub(historical_entries)
+    window._viewing_snapshot = True
+    window._latest_cache = [_entry(name="latest")]
+
+    saved = []
+    monkeypatch.setattr(
+        main.storage, "save_vault", lambda *args, **kwargs: saved.append(args)
+    )
+
+    assert main.MainWindow.save_and_refresh(window) is False
+    assert len(saved) == 0
+
+
+def test_modifying_actions_blocked_while_viewing_snapshot(monkeypatch):
+    window = _window_stub([_entry(name="historical")])
+    window._viewing_snapshot = True
+    window.reset_idle_timer = lambda: None
+
+    monkeypatch.setattr(
+        main,
+        "EntryDialog",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("EntryDialog opened")),
+    )
+    monkeypatch.setattr(
+        main,
+        "QDialog",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("QDialog opened")),
+    )
+    monkeypatch.setattr(
+        main,
+        "QMenu",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("QMenu opened")),
+    )
+    monkeypatch.setattr(
+        main.MsgBox,
+        "question",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("MsgBox opened")),
+    )
+
+    main.MainWindow.add_entry(window)
+    main.MainWindow.edit_entry(window)
+    main.MainWindow.delete_entry(window)
+    main.MainWindow.import_data(window)
+    main.MainWindow.show_context_menu(window, SimpleNamespace(y=lambda: 0))
+
+
+def test_set_readonly_toggles_shortcuts_and_buttons():
+    class DummyWidget:
+        def __init__(self):
+            self.enabled = None
+
+        def setEnabled(self, val):
+            self.enabled = val
+
+    class DummyTable:
+        def setEditTriggers(self, val):
+            self.triggers = val
+
+    window = SimpleNamespace(
+        table=DummyTable(),
+        add_btn=DummyWidget(),
+        delete_btn=DummyWidget(),
+        import_btn=DummyWidget(),
+        add_shortcut=DummyWidget(),
+        delete_shortcut=DummyWidget(),
+    )
+
+    main.MainWindow._set_readonly(window, True)
+    assert window.add_btn.enabled is False
+    assert window.delete_btn.enabled is False
+    assert window.import_btn.enabled is False
+    assert window.add_shortcut.enabled is False
+    assert window.delete_shortcut.enabled is False
+
+    main.MainWindow._set_readonly(window, False)
+    assert window.add_btn.enabled is True
+    assert window.delete_btn.enabled is True
+    assert window.import_btn.enabled is True
+    assert window.add_shortcut.enabled is True
+    assert window.delete_shortcut.enabled is True
