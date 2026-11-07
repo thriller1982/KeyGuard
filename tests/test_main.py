@@ -330,3 +330,44 @@ def test_set_readonly_toggles_shortcuts_and_buttons():
     assert window.import_btn.enabled is True
     assert window.add_shortcut.enabled is True
     assert window.delete_shortcut.enabled is True
+
+
+def test_drag_select_table_initial_adjust_distributes_weights():
+    import sys
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    table = main.DragSelectTableWidget(0, 7)
+    table.resize(800, 400)
+    table.adjust_column_widths(700)
+    widths = [table.columnWidth(i) for i in range(7)]
+    assert sum(widths) == 700
+    assert widths[1] > widths[0]
+    assert widths[1] > widths[3]
+
+
+def test_drag_select_table_proportional_resizing():
+    import sys
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    table = main.DragSelectTableWidget(0, 7)
+    table.adjust_column_widths(700)
+    initial_widths = [table.columnWidth(i) for i in range(7)]
+
+    table.adjust_column_widths(1400)
+    larger_widths = [table.columnWidth(i) for i in range(7)]
+    assert sum(larger_widths) == 1400
+    for init_w, large_w in zip(initial_widths, larger_widths):
+        assert abs(large_w - init_w * 2) <= 2
+
+
+def test_drag_select_table_respects_minimum_widths():
+    import sys
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    table = main.DragSelectTableWidget(0, 7)
+    table.adjust_column_widths(300)
+    widths = [table.columnWidth(i) for i in range(7)]
+    assert widths == main.DragSelectTableWidget.MIN_COLUMN_WIDTHS

@@ -8,7 +8,7 @@ import secrets
 import sys
 import uuid
 
-from PySide6.QtCore import Qt, QTimer, QTranslator, QLibraryInfo
+from PySide6.QtCore import Qt, QTimer, QTranslator, QLibraryInfo, QEvent
 from PySide6.QtGui import QFont, QGuiApplication, QIcon, QKeySequence, QMouseEvent, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -63,12 +63,63 @@ def get_resource_path(relative_path):
 
 
 class DragSelectTableWidget(QTableWidget):
-    """支持从空白区域开始拖选行的表格。"""
+    """支持从空白区域开始拖选行并自适应列宽的表格。"""
+
+    MIN_COLUMN_WIDTHS = [80, 100, 80, 80, 60, 80, 60]
+    DEFAULT_COLUMN_WEIGHTS = [16, 22, 16, 12, 10, 14, 10]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._drag_start_row = -1
         self._is_dragging = False
+        self._is_adjusting_columns = False
+
+    def adjust_column_widths(self, target_width=None):
+        if self.columnCount() == 0 or self._is_adjusting_columns:
+            return
+        if target_width is None:
+            target_width = self.viewport().width()
+        if target_width <= 0:
+            return
+
+        n = min(self.columnCount(), len(self.DEFAULT_COLUMN_WEIGHTS))
+        min_widths = self.MIN_COLUMN_WIDTHS[:n]
+        total_min = sum(min_widths)
+
+        if target_width < total_min:
+            new_widths = list(min_widths)
+        else:
+            current_widths = [self.columnWidth(i) for i in range(n)]
+            total_current = sum(current_widths)
+
+            if total_current <= 0 or all(w == 100 for w in current_widths):
+                weights = self.DEFAULT_COLUMN_WEIGHTS[:n]
+                total_w = sum(weights)
+                new_widths = []
+                for i in range(n - 1):
+                    w = max(min_widths[i], int(target_width * weights[i] / total_w))
+                    new_widths.append(w)
+                new_widths.append(max(min_widths[n - 1], target_width - sum(new_widths)))
+            else:
+                ratio = target_width / total_current
+                new_widths = []
+                for i in range(n - 1):
+                    w = max(min_widths[i], int(round(current_widths[i] * ratio)))
+                    new_widths.append(w)
+                new_widths.append(max(min_widths[n - 1], target_width - sum(new_widths)))
+
+        self._is_adjusting_columns = True
+        try:
+            for i, w in enumerate(new_widths):
+                self.setColumnWidth(i, w)
+        finally:
+            self._is_adjusting_columns = False
+
+    def viewportEvent(self, event):
+        res = super().viewportEvent(event)
+        if event.type() == QEvent.Resize:
+            self.adjust_column_widths()
+        return res
 
     def _row_at_or_clamp(self, y):
         """返回 y 坐标对应的行号，超出范围时夹紧到首/末行。"""
