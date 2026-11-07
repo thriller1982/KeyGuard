@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -43,6 +44,7 @@ from dialogs import (
     MsgBox,
     PasswordGenerator,
     SettingsDialog,
+    TwoFactorDialog,
     VaultPickerDialog,
 )
 
@@ -191,6 +193,7 @@ class MainWindow(QMainWindow):
         self._latest_cache = None
         self._current_changes = {}
         self._latest_changes = {}
+        self._last_totp_secret = ""
 
         # 为缺少 id 的条目补生成 id；若有改动立即落盘作为基线
         self.passwords, ids_changed = storage.ensure_entry_ids(self.passwords)
@@ -322,12 +325,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         self.main_layout = QVBoxLayout(central_widget)
 
-        top_layout = QHBoxLayout()
+        top_grid = QGridLayout()
+        top_grid.setColumnStretch(0, 1)
 
         self.search_bar = QLineEdit()
         self.search_bar.textChanged.connect(self.filter_entries)
         self.search_bar.textChanged.connect(lambda: self.reset_idle_timer())
-        top_layout.addWidget(self.search_bar)
+        top_grid.addWidget(self.search_bar, 0, 0)
 
         self.category_filter = QComboBox()
         self.category_filter.addItem(i18n._t("category_all"), "all")
@@ -337,27 +341,27 @@ class MainWindow(QMainWindow):
         self.category_filter.addItem(i18n._t("category_bank"), "bank")
         self.category_filter.addItem(i18n._t("category_other"), "other")
         self.category_filter.currentIndexChanged.connect(self.filter_entries)
-        top_layout.addWidget(self.category_filter)
+        top_grid.addWidget(self.category_filter, 0, 1)
 
         self.gen_tool_btn = QPushButton()
         self.gen_tool_btn.clicked.connect(self.open_generator)
-        top_layout.addWidget(self.gen_tool_btn)
+        top_grid.addWidget(self.gen_tool_btn, 0, 2)
 
         self.import_btn = QPushButton()
         self.import_btn.clicked.connect(self.import_data)
-        top_layout.addWidget(self.import_btn)
+        top_grid.addWidget(self.import_btn, 0, 3)
 
         self.export_btn = QPushButton()
         self.export_btn.clicked.connect(self.export_data)
-        top_layout.addWidget(self.export_btn)
+        top_grid.addWidget(self.export_btn, 0, 4)
 
         self.settings_btn = QPushButton()
         self.settings_btn.clicked.connect(self.open_settings)
-        top_layout.addWidget(self.settings_btn)
+        top_grid.addWidget(self.settings_btn, 0, 5)
 
-        self.main_layout.addLayout(top_layout)
-
-        batch_layout = QHBoxLayout()
+        batch_widget = QWidget()
+        batch_layout = QHBoxLayout(batch_widget)
+        batch_layout.setContentsMargins(0, 0, 0, 0)
 
         self.new_btn = QPushButton()
         self.new_btn.clicked.connect(self.new_vault)
@@ -370,9 +374,15 @@ class MainWindow(QMainWindow):
         self.version_combo = QComboBox()
         self.version_combo.currentIndexChanged.connect(self.on_version_changed)
         batch_layout.addWidget(self.version_combo)
-
         batch_layout.addStretch()
-        self.main_layout.addLayout(batch_layout)
+
+        top_grid.addWidget(batch_widget, 1, 0)
+
+        self.totp_btn = QPushButton()
+        self.totp_btn.clicked.connect(self.open_totp)
+        top_grid.addWidget(self.totp_btn, 1, 2)
+
+        self.main_layout.addLayout(top_grid)
 
         self.table = DragSelectTableWidget(0, 7)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -524,6 +534,7 @@ class MainWindow(QMainWindow):
         self.category_filter.setItemText(5, i18n._t("category_other"))
 
         self.gen_tool_btn.setText(i18n._t("generator_btn"))
+        self.totp_btn.setText(i18n._t("totp_btn"))
         self.import_btn.setText(i18n._t("import_btn"))
         self.export_btn.setText(i18n._t("export_btn"))
         self.settings_btn.setText(i18n._t("settings_btn"))
@@ -1069,6 +1080,12 @@ class MainWindow(QMainWindow):
         self.reset_idle_timer()
         gen = PasswordGenerator(self)
         gen.exec()
+
+    def open_totp(self):
+        self.reset_idle_timer()
+        dialog = TwoFactorDialog(self, initial_secret=self._last_totp_secret)
+        dialog.exec()
+        self._last_totp_secret = dialog.get_secret()
 
     def open_settings(self):
         self.reset_idle_timer()

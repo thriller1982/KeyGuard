@@ -81,3 +81,40 @@ def test_default_argon2_params_sanity():
     assert p["time_cost"] >= 1
     assert p["memory_cost_kib"] >= 8192
     assert p["parallelism"] >= 1
+
+
+def test_generate_totp_rfc6238_vectors():
+    # RFC 6238 standard test vector (ASCII '12345678901234567890' in Base32)
+    secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    code, rem, status = crypto_utils.generate_totp(secret, for_time=59)
+    assert status == "ok"
+    assert code == "287082"
+    assert rem == 1
+
+    code, rem, status = crypto_utils.generate_totp(secret, for_time=1111111109)
+    assert status == "ok"
+    assert code == "081804"
+
+    code, rem, status = crypto_utils.generate_totp(secret, for_time=1234567890)
+    assert status == "ok"
+    assert code == "005924"
+
+
+def test_generate_totp_handles_spaces_and_lowercase():
+    secret = "gezd gnbv gy3t qojq gezd gnbv gy3t qojq"
+    code, rem, status = crypto_utils.generate_totp(secret, for_time=59)
+    assert status == "ok"
+    assert code == "287082"
+
+
+def test_generate_totp_empty_and_invalid():
+    code, rem, status = crypto_utils.generate_totp("")
+    assert status == "empty"
+    assert code == ""
+
+    code, rem, status = crypto_utils.generate_totp("   ")
+    assert status == "empty"
+
+    code, rem, status = crypto_utils.generate_totp("invalid189!!!")
+    assert status == "invalid"
+    assert code == ""

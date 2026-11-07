@@ -896,3 +896,112 @@ class VaultPickerDialog(QDialog):
         self.chosen_path = path
         self.chosen_action = "open"
         self.accept()
+
+
+class TwoFactorDialog(QDialog):
+    def __init__(self, parent=None, initial_secret=""):
+        super().__init__(parent)
+        self.setMinimumWidth(380)
+
+        self.current_code = ""
+
+        layout = QVBoxLayout(self)
+
+        self.secret_label = QLabel()
+        self.secret_input = QLineEdit(initial_secret)
+        self.secret_input.setClearButtonEnabled(True)
+        self.secret_input.textChanged.connect(self.on_secret_changed)
+        layout.addWidget(self.secret_label)
+        layout.addWidget(self.secret_input)
+
+        self.code_display = QLabel("------")
+        self.code_display.setAlignment(Qt.AlignCenter)
+        code_font = QFont("Consolas, Courier New, Monospace", 26)
+        code_font.setBold(True)
+        self.code_display.setFont(code_font)
+        self.code_display.setStyleSheet(
+            "QLabel { background-color: #f0f3f6; border-radius: 6px; padding: 12px; color: #2c3e50; }"
+        )
+        layout.addWidget(self.code_display)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 30)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(6)
+        layout.addWidget(self.progress_bar)
+
+        self.status_label = QLabel()
+        self.status_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.status_label)
+
+        btn_layout = QHBoxLayout()
+        self.copy_btn = QPushButton()
+        self.copy_btn.clicked.connect(self.copy_code)
+        self.close_btn = QPushButton()
+        self.close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(self.copy_btn)
+        btn_layout.addWidget(self.close_btn)
+        layout.addLayout(btn_layout)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_code)
+        self.timer.start(1000)
+
+        self.retranslate_ui()
+        self.update_code()
+
+    def retranslate_ui(self):
+        self.setWindowTitle(i18n._t("totp_title"))
+        self.secret_label.setText(i18n._t("totp_secret_label"))
+        self.secret_input.setPlaceholderText(i18n._t("totp_secret_placeholder"))
+        self.copy_btn.setText(i18n._t("totp_copy_btn"))
+        self.close_btn.setText(i18n._t("btn_ok"))
+        self.update_code()
+
+    def on_secret_changed(self):
+        self.update_code()
+
+    def update_code(self):
+        secret = self.secret_input.text()
+        code, remaining, status = crypto_utils.generate_totp(secret)
+
+        self.progress_bar.setValue(remaining)
+        if remaining <= 5:
+            self.progress_bar.setStyleSheet(
+                "QProgressBar { background: #e0e0e0; border-radius: 3px; border: none; }"
+                "QProgressBar::chunk { background: #e74c3c; border-radius: 3px; }"
+            )
+        else:
+            self.progress_bar.setStyleSheet(
+                "QProgressBar { background: #e0e0e0; border-radius: 3px; border: none; }"
+                "QProgressBar::chunk { background: #3498db; border-radius: 3px; }"
+            )
+
+        if status == "ok":
+            self.current_code = code
+            formatted = f"{code[:3]} {code[3:]}" if len(code) == 6 else code
+            self.code_display.setText(formatted)
+            self.status_label.setText(i18n._t("totp_countdown").format(sec=remaining))
+            self.status_label.setStyleSheet("color: #7f8c8d;")
+            self.copy_btn.setEnabled(True)
+        elif status == "invalid":
+            self.current_code = ""
+            self.code_display.setText("------")
+            self.status_label.setText(i18n._t("totp_invalid_secret"))
+            self.status_label.setStyleSheet("color: #e74c3c;")
+            self.copy_btn.setEnabled(False)
+        else:
+            self.current_code = ""
+            self.code_display.setText("------")
+            self.status_label.setText(i18n._t("totp_empty_hint"))
+            self.status_label.setStyleSheet("color: #7f8c8d;")
+            self.copy_btn.setEnabled(False)
+
+    def copy_code(self):
+        if self.current_code:
+            QApplication.clipboard().setText(self.current_code)
+            self.copy_btn.setText(i18n._t("totp_copied"))
+            QTimer.singleShot(1500, lambda: self.copy_btn.setText(i18n._t("totp_copy_btn")))
+
+    def get_secret(self):
+        return self.secret_input.text().strip()

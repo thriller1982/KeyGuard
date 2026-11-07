@@ -1,6 +1,10 @@
 import base64
+import hashlib
+import hmac
 import os
 import string
+import struct
+import time
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
@@ -345,3 +349,40 @@ def get_strength_color(strength: str) -> str:
         "strong": "#27ae60",
     }
     return colors.get(strength, "#95a5a6")
+
+
+def generate_totp(
+    secret_str: str,
+    for_time: float | None = None,
+    digits: int = 6,
+    interval: int = 30,
+) -> tuple[str, int, str]:
+    """生成符合 RFC 6238 / RFC 4226 标准的 TOTP 动态验证码。
+
+    返回 (code, remaining_seconds, status)。
+    status 可取值:
+      - 'ok': 成功生成 6 位动态验证码
+      - 'empty': 密钥为空
+      - 'invalid': 密钥不是有效的 Base32 编码
+    """
+    cleaned = secret_str.strip().replace(" ", "").replace("-", "").upper()
+    if not cleaned:
+        return "", 0, "empty"
+
+    padding = (8 - len(cleaned) % 8) % 8
+    try:
+        key = base64.b32decode(cleaned + ("=" * padding), casefold=True)
+    except Exception:
+        return "", 0, "invalid"
+
+    if for_time is None:
+        for_time = time.time()
+
+    counter = int(for_time // interval)
+    counter_bytes = struct.pack(">Q", counter)
+    mac = hmac.new(key, counter_bytes, hashlib.sha1).digest()
+    offset = mac[-1] & 0x0F
+    code_int = struct.unpack(">I", mac[offset : offset + 4])[0] & 0x7FFFFFFF
+    code = str(code_int % (10**digits)).zfill(digits)
+    remaining = interval - int(for_time) % interval
+    return code, remaining, "ok"

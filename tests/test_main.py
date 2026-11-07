@@ -371,3 +371,43 @@ def test_drag_select_table_respects_minimum_widths():
     table.adjust_column_widths(300)
     widths = [table.columnWidth(i) for i in range(7)]
     assert widths == main.DragSelectTableWidget.MIN_COLUMN_WIDTHS
+
+
+def test_totp_button_alignment_under_generator(monkeypatch):
+    import sys
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    monkeypatch.setattr(main.storage, "save_vault", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main.MainWindow, "closeEvent", lambda self, event: event.accept())
+
+    win = main.MainWindow("vault.kgvault", [], {}, b"k" * 32, b"s" * 16, {})
+    win.show()
+    app.processEvents()
+
+    gen = win.gen_tool_btn
+    totp = win.totp_btn
+    assert gen.x() == totp.x()
+    assert gen.width() == totp.width()
+    assert totp.y() > gen.y()
+    win.hide()
+
+
+def test_open_totp_remembers_last_secret(monkeypatch):
+    window = _window_stub([_entry()])
+    window._last_totp_secret = "INITSECRET"
+    window.reset_idle_timer = lambda: None
+
+    class StubDialog:
+        def __init__(self, parent, initial_secret=""):
+            assert initial_secret == "INITSECRET"
+
+        def exec(self):
+            return True
+
+        def get_secret(self):
+            return "NEWSECRET"
+
+    monkeypatch.setattr(main, "TwoFactorDialog", StubDialog)
+    main.MainWindow.open_totp(window)
+    assert window._last_totp_secret == "NEWSECRET"
