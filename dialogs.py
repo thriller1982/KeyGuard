@@ -1,3 +1,4 @@
+import datetime
 import secrets
 import string
 import sys
@@ -373,6 +374,12 @@ class EntryDialog(QDialog):
         self.form_layout.addRow(self._row_labels["entry_category"], self.category_combo)
         self.form_layout.addRow(self._row_labels["entry_notes"], self.notes_edit)
         self.form_layout.addRow("", self._history_layout)
+        self.time_label = QLabel()
+        self.time_label.setStyleSheet("color: gray; font-size: 11px;")
+        if self.entry and self.entry.get("updated_at"):
+            self.time_label.setText(i18n._t("entry_modified_at").format(self.entry.get("updated_at")))
+            self.form_layout.addRow("", self.time_label)
+
         self.form_layout.addRow(self._btn_layout)
 
         self.retranslate_ui()
@@ -382,6 +389,9 @@ class EntryDialog(QDialog):
         self.setWindowTitle(i18n._t("entry_title"))
         for key, lbl in self._row_labels.items():
             lbl.setText(i18n._t(key))
+
+        if hasattr(self, "time_label") and self.entry and self.entry.get("updated_at"):
+            self.time_label.setText(i18n._t("entry_modified_at").format(self.entry.get("updated_at")))
 
         self.toggle_btn.setText(
             i18n._t("hide_password")
@@ -445,6 +455,12 @@ class EntryDialog(QDialog):
         super().accept()
 
     def get_data(self):
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        created_at = (
+            self.entry.get("created_at")
+            if self.entry and self.entry.get("created_at")
+            else (self.entry.get("updated_at") if self.entry and self.entry.get("updated_at") else now_str)
+        )
         return {
             "id": self.entry.get("id") if self.entry else uuid.uuid4().hex,
             "name": self.name_edit.text(),
@@ -454,6 +470,8 @@ class EntryDialog(QDialog):
             "notes": self.notes_edit.toPlainText(),
             "category": self.category_combo.currentData(),
             "password_history": self.entry.get("password_history", []) if self.entry else [],
+            "created_at": created_at,
+            "updated_at": now_str,
         }
 
 

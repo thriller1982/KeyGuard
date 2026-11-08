@@ -82,7 +82,7 @@ def test_settings_save_writes_vault(monkeypatch):
 def test_close_without_changes_does_not_save(monkeypatch):
     window = _window_stub([_entry()])
     window._dirty = False
-    window.preferences = {"column_widths": [100] * 6}
+    window.preferences = {"column_widths": [100] * 7}
     window.table = SimpleNamespace(columnWidth=lambda index: 100)
     event = SimpleNamespace(accepted=False, ignored=False)
     event.accept = lambda: setattr(event, "accepted", True)
@@ -189,10 +189,10 @@ def test_drag_select_table_initial_adjust_distributes_weights():
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(sys.argv)
-    table = main.DragSelectTableWidget(0, 6)
+    table = main.DragSelectTableWidget(0, 7)
     table.resize(800, 400)
     table.adjust_column_widths(700)
-    widths = [table.columnWidth(i) for i in range(6)]
+    widths = [table.columnWidth(i) for i in range(7)]
     assert sum(widths) == 700
     assert widths[1] > widths[0]
     assert widths[1] > widths[3]
@@ -203,12 +203,12 @@ def test_drag_select_table_proportional_resizing():
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(sys.argv)
-    table = main.DragSelectTableWidget(0, 6)
+    table = main.DragSelectTableWidget(0, 7)
     table.adjust_column_widths(700)
-    initial_widths = [table.columnWidth(i) for i in range(6)]
+    initial_widths = [table.columnWidth(i) for i in range(7)]
 
     table.adjust_column_widths(1400)
-    larger_widths = [table.columnWidth(i) for i in range(6)]
+    larger_widths = [table.columnWidth(i) for i in range(7)]
     assert sum(larger_widths) == 1400
     for init_w, large_w in zip(initial_widths, larger_widths):
         assert abs(large_w - init_w * 2) <= 2
@@ -219,9 +219,9 @@ def test_drag_select_table_respects_minimum_widths():
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(sys.argv)
-    table = main.DragSelectTableWidget(0, 6)
+    table = main.DragSelectTableWidget(0, 7)
     table.adjust_column_widths(300)
-    widths = [table.columnWidth(i) for i in range(6)]
+    widths = [table.columnWidth(i) for i in range(7)]
     assert widths == main.DragSelectTableWidget.MIN_COLUMN_WIDTHS
 
 
@@ -391,3 +391,57 @@ def test_trash_button_layout_in_bottom_right(monkeypatch):
     assert win.btn_layout.itemAt(0).widget() == win.add_btn
     assert win.btn_layout.itemAt(1).widget() == win.delete_btn
     assert win.btn_layout.itemAt(3).widget() == win.trash_btn
+
+
+def test_entry_dialog_creates_and_updates_timestamp():
+    import sys
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    # Test new entry
+    dlg_new = main.EntryDialog()
+    dlg_new.name_edit.setText("Service A")
+    dlg_new.password_edit.setText("secret")
+    data_new = dlg_new.get_data()
+    assert data_new["updated_at"]
+    assert len(data_new["updated_at"]) == 19  # YYYY-MM-DD HH:MM:SS
+
+    # Test existing entry
+    old_entry = {
+        "id": "e-1",
+        "name": "Service B",
+        "password": "old",
+        "updated_at": "2026-01-01 10:00:00",
+    }
+    dlg_edit = main.EntryDialog(entry=old_entry)
+    dlg_edit.password_edit.setText("new-secret")
+    data_edit = dlg_edit.get_data()
+    assert data_edit["updated_at"] > "2026-01-01 10:00:00"
+
+
+def test_main_window_table_column_structure(monkeypatch):
+    import sys
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    monkeypatch.setattr(main.storage, "save_vault", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main.MainWindow, "closeEvent", lambda self, event: event.accept())
+
+    test_entries = [
+        {
+            "id": "1",
+            "name": "Site 1",
+            "url": "https://example.com",
+            "username": "user1",
+            "password": "pwd",
+            "category": "website",
+            "notes": "my notes",
+            "updated_at": "2026-11-08 12:00:00",
+        }
+    ]
+    win = main.MainWindow("test.kgvault", test_entries, {}, b"k" * 32, b"s" * 16, {})
+
+    # Columns: 0:Name, 1:URL, 2:Username, 3:Password, 4:Category, 5:Notes, 6:Modified
+    assert win.table.columnCount() == 7
+    assert win.table.item(0, 5).text() == "my notes"
+    assert win.table.item(0, 6).text() == "2026-11-08 12:00:00"

@@ -357,3 +357,14 @@ def test_save_and_load_vault_trash_roundtrip(storage_module):
     assert loaded_trash[0]["username"] == "duser1"
     assert loaded_trash[0]["deleted_at"] == "2026-11-07 10:00:00"
     assert loaded_trash[0]["category"] == "other"
+
+
+def test_normalize_entries_populates_updated_at(storage_module):
+    """验证老条目缺少 updated_at 时，自动从 password_history 恢复或补空。"""
+    entries = [
+        {"name": "e1", "password_history": [{"date": "2026-01-01 12:00:00", "password": "old"}]},
+        {"name": "e2"},
+    ]
+    normalized = storage_module._normalize_entries(entries)
+    assert normalized[0]["updated_at"] == "2026-01-01 12:00:00"
+    assert normalized[1]["updated_at"] == ""

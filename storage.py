@@ -113,6 +113,12 @@ def _normalize_entries(passwords):
             entry["category"] = "other"
         if "password_history" not in entry:
             entry["password_history"] = []
+        if "updated_at" not in entry:
+            hist = entry.get("password_history")
+            if hist and isinstance(hist, list) and isinstance(hist[0], dict) and hist[0].get("date"):
+                entry["updated_at"] = hist[0]["date"]
+            else:
+                entry["updated_at"] = ""
     return passwords
 
 
@@ -131,6 +137,12 @@ def _normalize_trash_entries(trash):
             item["category"] = "other"
         if "password_history" not in item:
             item["password_history"] = []
+        if "updated_at" not in item:
+            hist = item.get("password_history")
+            if hist and isinstance(hist, list) and isinstance(hist[0], dict) and hist[0].get("date"):
+                item["updated_at"] = hist[0]["date"]
+            else:
+                item["updated_at"] = ""
         if "deleted_at" not in item:
             item["deleted_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         normalized.append(item)

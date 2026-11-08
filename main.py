@@ -68,8 +68,8 @@ def get_resource_path(relative_path):
 class DragSelectTableWidget(QTableWidget):
     """支持从空白区域开始拖选行并自适应列宽的表格。"""
 
-    MIN_COLUMN_WIDTHS = [80, 100, 80, 80, 60, 80]
-    DEFAULT_COLUMN_WEIGHTS = [18, 26, 18, 14, 10, 14]
+    MIN_COLUMN_WIDTHS = [70, 90, 70, 70, 50, 70, 90]
+    DEFAULT_COLUMN_WEIGHTS = [16, 22, 16, 12, 8, 12, 14]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -346,7 +346,7 @@ class MainWindow(QMainWindow):
 
         self.main_layout.addLayout(top_grid)
 
-        self.table = DragSelectTableWidget(0, 6)
+        self.table = DragSelectTableWidget(0, 7)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -359,7 +359,7 @@ class MainWindow(QMainWindow):
         config = self.preferences
         col_widths = config.get("column_widths", [])
         for i, w in enumerate(col_widths):
-            if i < 6:
+            if i < 7:
                 self.table.setColumnWidth(i, w)
 
         self.table.viewport().installEventFilter(self)
@@ -390,7 +390,7 @@ class MainWindow(QMainWindow):
         self.retranslate_ui()
 
     def closeEvent(self, event):
-        current_widths = [self.table.columnWidth(i) for i in range(6)]
+        current_widths = [self.table.columnWidth(i) for i in range(7)]
         widths_changed = self.preferences.get("column_widths") != current_widths
         self.preferences["column_widths"] = current_widths
         if not self._dirty and not widths_changed:
@@ -470,6 +470,7 @@ class MainWindow(QMainWindow):
             i18n._t("table_password"),
             i18n._t("table_category"),
             i18n._t("table_notes"),
+            i18n._t("table_modified_at"),
         ]
         self.table.setHorizontalHeaderLabels(headers)
 
@@ -524,6 +525,7 @@ class MainWindow(QMainWindow):
                 QTableWidgetItem(self.get_category_text(entry.get("category", "other"))),
             )
             self.table.setItem(row, 5, QTableWidgetItem(entry.get("notes", "")))
+            self.table.setItem(row, 6, QTableWidgetItem(entry.get("updated_at", "") or "-"))
             self.table.item(row, 0).setData(Qt.UserRole, i)
 
         total = len(self.passwords)
@@ -666,7 +668,7 @@ class MainWindow(QMainWindow):
             self.clipboard_timer.start(CLIPBOARD_CLEAR_MS)
             return
 
-        if col in (0, 1, 2, 4, 5):
+        if col in (0, 1, 2, 4, 5, 6):
             item = self.table.item(row, col)
             if item:
                 QApplication.clipboard().setText(item.text())
@@ -854,6 +856,7 @@ class MainWindow(QMainWindow):
                     "password": row.get("password", ""),
                     "notes": row.get("notes", ""),
                     "category": row.get("category", "other"),
+                    "updated_at": row.get("updated_at", ""),
                 }
                 if not entry["name"]:
                     continue
@@ -956,7 +959,7 @@ class MainWindow(QMainWindow):
     def export_csv(self, file_path):
         import csv as csv_module
 
-        fieldnames = ["name", "url", "username", "password", "notes", "category"]
+        fieldnames = ["name", "url", "username", "password", "category", "notes", "updated_at"]
         with open(file_path, "w", encoding="utf-8", newline="") as f:
             writer = csv_module.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
