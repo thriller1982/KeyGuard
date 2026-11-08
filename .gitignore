@@ -12,3 +12,5 @@ dist/
 *.kgvault.tmp
 *.kgvault.recovery
 *.bak
+*.log
+onedrive-documents-to-f-sync*
