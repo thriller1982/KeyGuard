@@ -1,4 +1,4 @@
-# KeyGuard v2.0.0
+# KeyGuard v3.0.0
 
 KeyGuard 是一个基于 Python 和 PySide6 的便携式本地密码管理器。
 
@@ -8,8 +8,8 @@ KeyGuard 是一个基于 Python 和 PySide6 的便携式本地密码管理器。
 
 ## 当前版本
 
-- 产品版本：`2.0.0`
-- 文件版本：`2.0.0`
+- 产品版本：`3.0.0`
+- 文件版本：`3.0.0`
 - 产品名称：`KeyGuard`
 - 版权：`Copyright © 2026 thriller1982. All rights reserved.`
 
