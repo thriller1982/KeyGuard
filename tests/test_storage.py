@@ -60,13 +60,14 @@ def test_save_and_load_vault_v3_roundtrip(storage_module):
         storage_module, path, "secret", [{"name": "demo", "password": "v"}],
         prefs={"language": "en", "column_widths": [80, 90]},
     )
-    entries, prefs, k2, s2, kdf2 = storage_module.load_vault(path, "secret")
+    entries, prefs, k2, s2, kdf2, trash = storage_module.load_vault(path, "secret")
     assert entries[0]["name"] == "demo"
     assert entries[0]["category"] == "other"
     assert k2 == key and s2 == salt
     assert kdf2["algorithm"] == "argon2id"
     assert prefs["language"] == "en"
     assert prefs["column_widths"] == [80, 90]
+    assert trash == []
 
 
 def test_vault_version_is_3(storage_module):
@@ -92,9 +93,10 @@ def test_load_vault_by_key_roundtrip(storage_module):
     key, salt, kdf_spec = _make_vault(
         storage_module, path, "secret", [{"name": "x", "password": "1"}]
     )
-    entries, prefs, k2, s2, kdf2 = storage_module.load_vault_by_key(path, key)
+    entries, prefs, k2, s2, kdf2, trash = storage_module.load_vault_by_key(path, key)
     assert entries[0]["name"] == "x"
     assert k2 == key and s2 == salt and kdf2 == kdf_spec
+    assert trash == []
 
 
 def test_load_vault_v2_raises_unsupported(storage_module):
@@ -139,10 +141,11 @@ def test_create_new_vault_writes_valid_v3(storage_module):
     path = str(Path(storage_module.get_app_dir()) / "new.kgvault")
     key, salt, kdf_spec = storage_module.create_new_vault(path, "master")
     assert storage_module.is_vault_file(path) is True
-    entries, prefs, k2, s2, kdf2 = storage_module.load_vault(path, "master")
+    entries, prefs, k2, s2, kdf2, trash = storage_module.load_vault(path, "master")
     assert entries == []
     assert prefs == storage_module.DEFAULT_PREFERENCES
     assert k2 == key
+    assert trash == []
 
 
 def test_migrate_legacy_passwords_json_to_v3(storage_module):
@@ -165,12 +168,13 @@ def test_migrate_legacy_passwords_json_to_v3(storage_module):
         str(legacy_pw), str(legacy_cfg), target, "secret"
     )
 
-    entries, prefs, k2, s2, kdf2 = storage_module.load_vault(target, "secret")
+    entries, prefs, k2, s2, kdf2, trash = storage_module.load_vault(target, "secret")
     assert entries[0]["name"] == "old"
     assert prefs["language"] == "en"
     assert prefs["auto_lock_minutes"] == 5
     assert kdf2["algorithm"] == "argon2id"
     assert k2 == new_key
+    assert trash == []
     # 旧文件改名 .bak
     assert not legacy_pw.exists()
     assert Path(str(legacy_pw) + ".bak").exists()
@@ -290,7 +294,7 @@ def test_load_vault_ignores_existing_snapshots_field(storage_module):
     container["snapshots"] = [{"timestamp": "2026-01-01 00:00:00", "data": "dummy"}]
     with open(path, "w", encoding="utf-8") as f:
         json.dump(container, f)
-    entries, prefs, k2, s2, kdf2 = storage_module.load_vault(path, "secret")
+    entries, prefs, k2, s2, kdf2, trash = storage_module.load_vault(path, "secret")
     assert entries[0]["name"] == "v1"
     assert k2 == key
 
@@ -302,7 +306,7 @@ def test_save_vault_atomic_in_place(storage_module):
     assert Path(path).exists()
     # 再次保存
     storage_module.save_vault(path, [{"name": "item2"}], {}, key, salt, kdf_spec)
-    entries, _, _, _, _ = storage_module.load_vault(path, "secret")
+    entries, _, _, _, _, _ = storage_module.load_vault(path, "secret")
     assert len(entries) == 1
     assert entries[0]["name"] == "item2"
 
@@ -318,5 +322,38 @@ def test_migrate_legacy_generates_entry_ids(storage_module):
 
     target = str(Path(storage_module.get_app_dir()) / "migrated.kgvault")
     storage_module.migrate_legacy_passwords_json(str(legacy_pw), None, target, "secret")
-    entries, prefs, k, s, kdf = storage_module.load_vault(target, "secret")
+    entries, prefs, k, s, kdf, trash = storage_module.load_vault(target, "secret")
     assert entries[0]["id"]  # 迁移后应有 id
+    assert trash == []
+
+
+def test_save_and_load_vault_trash_roundtrip(storage_module):
+    """回收站条目加密保存与解密恢复往返测试。"""
+    path = str(Path(storage_module.get_app_dir()) / "trash_test.kgvault")
+    salt = crypto_utils.generate_salt()
+    kdf_spec = storage_module._argon2_kdf_spec(salt)
+    key = crypto_utils.derive_key_for_kdf("pass123", salt, kdf_spec)
+
+    active_entries = [{"name": "active1", "username": "user1"}]
+    trash_entries = [
+        {"name": "deleted1", "username": "duser1", "deleted_at": "2026-11-07 10:00:00"}
+    ]
+
+    storage_module.save_vault(
+        path,
+        active_entries,
+        {"language": "zh"},
+        key,
+        salt,
+        kdf_spec,
+        trash=trash_entries,
+    )
+
+    loaded_entries, prefs, k2, s2, kdf2, loaded_trash = storage_module.load_vault(path, "pass123")
+    assert len(loaded_entries) == 1
+    assert loaded_entries[0]["name"] == "active1"
+    assert len(loaded_trash) == 1
+    assert loaded_trash[0]["name"] == "deleted1"
+    assert loaded_trash[0]["username"] == "duser1"
+    assert loaded_trash[0]["deleted_at"] == "2026-11-07 10:00:00"
+    assert loaded_trash[0]["category"] == "other"

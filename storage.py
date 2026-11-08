@@ -119,6 +119,24 @@ def _normalize_entries(passwords):
 _normalize_passwords = _normalize_entries
 
 
+def _normalize_trash_entries(trash):
+    if not isinstance(trash, list):
+        return []
+    normalized = []
+    for entry in trash:
+        if not isinstance(entry, dict):
+            continue
+        item = dict(entry)
+        if "category" not in item:
+            item["category"] = "other"
+        if "password_history" not in item:
+            item["password_history"] = []
+        if "deleted_at" not in item:
+            item["deleted_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        normalized.append(item)
+    return normalized
+
+
 def ensure_entry_ids(entries):
     """为缺少 id 的条目生成 uuid4 hex。返回 (entries, changed)。
 
@@ -205,7 +223,7 @@ def is_vault_file(path: str) -> bool:
 
 
 def _parse_vault_container(data: dict, password: str):
-    """解析 v3 vault 容器，返回 (entries, prefs, key, salt, kdf_spec)。"""
+    """解析 v3 vault 容器，返回 (entries, prefs, key, salt, kdf_spec, trash)。"""
     if data.get("magic") != VAULT_MAGIC:
         raise VaultError("unsupported_format")
     version = data.get("version")
@@ -224,12 +242,13 @@ def _parse_vault_container(data: dict, password: str):
     payload = _decrypt_payload(encrypted_hex, key)
     entries = _normalize_entries(payload.get("entries", []))
     prefs = _with_preferences_defaults(payload.get("preferences", {}))
+    trash = _normalize_trash_entries(payload.get("trash", []))
 
-    return entries, prefs, key, salt, kdf_spec
+    return entries, prefs, key, salt, kdf_spec, trash
 
 
 def _parse_vault_container_by_key(data: dict, key: bytes):
-    """用已派生的 key 解析 v3 容器，返回 (entries, prefs, key, salt, kdf_spec)。"""
+    """用已派生的 key 解析 v3 容器，返回 (entries, prefs, key, salt, kdf_spec, trash)。"""
     if data.get("magic") != VAULT_MAGIC:
         raise VaultError("unsupported_format")
     if data.get("version") != VAULT_VERSION:
@@ -250,12 +269,13 @@ def _parse_vault_container_by_key(data: dict, key: bytes):
     payload = _decrypt_payload(encrypted_hex, key)
     entries = _normalize_entries(payload.get("entries", []))
     prefs = _with_preferences_defaults(payload.get("preferences", {}))
+    trash = _normalize_trash_entries(payload.get("trash", []))
 
-    return entries, prefs, key, salt, kdf_spec
+    return entries, prefs, key, salt, kdf_spec, trash
 
 
 def load_vault(path: str, password: str):
-    """读取并解密 v3 vault。返回 (entries, preferences, key, salt, kdf_spec)。"""
+    """读取并解密 v3 vault。返回 (entries, preferences, key, salt, kdf_spec, trash)。"""
     if not os.path.exists(path):
         raise VaultError("missing_file")
     data = _read_vault_container(path)
@@ -263,19 +283,24 @@ def load_vault(path: str, password: str):
 
 
 def load_vault_by_key(path: str, key: bytes):
-    """用已派生的 key 直接解密 v3 vault。返回 (entries, preferences, key, salt, kdf_spec)。"""
+    """用已派生的 key 直接解密 v3 vault。返回 (entries, preferences, key, salt, kdf_spec, trash)。"""
     if not os.path.exists(path):
         raise VaultError("missing_file")
     data = _read_vault_container(path)
     return _parse_vault_container_by_key(data, key)
 
 
-def save_vault(path: str, entries: list, preferences: dict, key: bytes, salt: bytes, kdf_spec: dict):
+def save_vault(path: str, entries: list, preferences: dict, key: bytes, salt: bytes, kdf_spec: dict, trash: list | None = None):
     """加密后保存 vault（v3 格式）。"""
     normalized_entries = _normalize_entries(entries)
     prefs = _with_preferences_defaults(preferences)
+    normalized_trash = _normalize_trash_entries(trash if trash is not None else [])
 
-    payload = {"entries": normalized_entries, "preferences": prefs}
+    payload = {
+        "entries": normalized_entries,
+        "preferences": prefs,
+        "trash": normalized_trash,
+    }
     encrypted_hex = _encrypt_payload(payload, key)
 
     spec = dict(kdf_spec)
@@ -323,7 +348,7 @@ def create_new_vault(path: str, password: str, preferences: dict | None = None) 
     kdf_spec = _argon2_kdf_spec(salt)
     key = crypto_utils.derive_key_for_kdf(password, salt, kdf_spec)
     prefs = _with_preferences_defaults(preferences or {})
-    save_vault(path, [], prefs, key, salt, kdf_spec)
+    save_vault(path, [], prefs, key, salt, kdf_spec, trash=[])
     return key, salt, kdf_spec
 
 
@@ -432,7 +457,7 @@ def migrate_legacy_passwords_json(
     new_salt = crypto_utils.generate_salt()
     new_kdf_spec = _argon2_kdf_spec(new_salt)
     new_key = crypto_utils.derive_key_for_kdf(password, new_salt, new_kdf_spec)
-    save_vault(target_path, entries, prefs, new_key, new_salt, new_kdf_spec)
+    save_vault(target_path, entries, prefs, new_key, new_salt, new_kdf_spec, trash=[])
 
     for old in (legacy_passwords_path, legacy_config_path):
         if old and os.path.exists(old):

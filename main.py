@@ -44,6 +44,7 @@ from dialogs import (
     MsgBox,
     PasswordGenerator,
     SettingsDialog,
+    TrashDialog,
     TwoFactorDialog,
     VaultPickerDialog,
 )
@@ -176,13 +177,14 @@ class DragSelectTableWidget(QTableWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, vault_path, entries, preferences, master_key, master_salt, kdf_spec):
+    def __init__(self, vault_path, entries, preferences, master_key, master_salt, kdf_spec, trash=None):
         super().__init__()
         self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
         self.setWindowIcon(QIcon(get_resource_path("icon.ico")))
 
         self.vault_path = vault_path
         self.passwords = entries
+        self.trash = list(trash) if trash else []
         self.preferences = preferences or storage.DEFAULT_PREFERENCES.copy()
         self.master_key = master_key
         self.master_salt = master_salt
@@ -191,12 +193,14 @@ class MainWindow(QMainWindow):
         self._last_totp_secret = ""
 
         # 为缺少 id 的条目补生成 id；若有改动立即落盘作为基线
-        self.passwords, ids_changed = storage.ensure_entry_ids(self.passwords)
-        if ids_changed:
+        self.passwords, ids_changed_p = storage.ensure_entry_ids(self.passwords)
+        self.trash, ids_changed_t = storage.ensure_entry_ids(self.trash)
+        if ids_changed_p or ids_changed_t:
             try:
                 storage.save_vault(
                     self.vault_path, self.passwords, self.preferences,
                     self.master_key, self.master_salt, self.kdf_spec,
+                    trash=self.trash,
                 )
             except Exception:
                 pass
@@ -230,6 +234,7 @@ class MainWindow(QMainWindow):
                 self.master_key,
                 self.master_salt,
                 self.kdf_spec,
+                trash=self.trash,
             )
             self._dirty = False
             return True
@@ -367,6 +372,9 @@ class MainWindow(QMainWindow):
         self.btn_layout.addWidget(self.add_btn)
         self.btn_layout.addWidget(self.delete_btn)
         self.btn_layout.addStretch(1)
+        self.trash_btn = QPushButton()
+        self.trash_btn.clicked.connect(self.open_trash)
+        self.btn_layout.addWidget(self.trash_btn)
         self.main_layout.addLayout(self.btn_layout)
 
         self.status_label = QLabel()
@@ -397,6 +405,7 @@ class MainWindow(QMainWindow):
                 self.master_key,
                 self.master_salt,
                 self.kdf_spec,
+                trash=self.trash,
             )
             self._dirty = False
         except Exception as exc:
@@ -452,6 +461,7 @@ class MainWindow(QMainWindow):
         self.settings_btn.setText(i18n._t("settings_btn"))
         self.add_btn.setText(i18n._t("add_btn"))
         self.delete_btn.setText(i18n._t("delete_btn"))
+        self.update_trash_btn()
 
         headers = [
             i18n._t("table_name"),
@@ -462,6 +472,19 @@ class MainWindow(QMainWindow):
             i18n._t("table_notes"),
         ]
         self.table.setHorizontalHeaderLabels(headers)
+
+    def update_trash_btn(self):
+        count = len(self.trash) if hasattr(self, "trash") and self.trash else 0
+        if hasattr(self, "trash_btn"):
+            if count > 0:
+                self.trash_btn.setText(i18n._t("trash_btn_with_count").format(count))
+            else:
+                self.trash_btn.setText(i18n._t("trash_btn"))
+
+    def open_trash(self):
+        self.reset_idle_timer()
+        dialog = TrashDialog(self)
+        dialog.exec()
 
     def get_category_text(self, category):
         category_map = {
@@ -580,26 +603,32 @@ class MainWindow(QMainWindow):
         if len(selected_rows) == 1:
             row = list(selected_rows)[0]
             orig_index = self.table.item(row, 0).data(Qt.UserRole)
-            msg = i18n._t("confirm_delete_msg").format(self.passwords[orig_index]["name"])
+            entry_name = self.passwords[orig_index].get("name", "")
+            msg = i18n._t("confirm_move_to_trash_msg").format(entry_name)
         else:
-            msg = i18n._t("confirm_delete_msg_plural").format(len(selected_rows))
+            msg = i18n._t("confirm_move_to_trash_msg_plural").format(len(selected_rows))
 
         reply = MsgBox.question(
             self,
-            i18n._t("confirm_delete_title"),
+            i18n._t("confirm_move_to_trash_title"),
             msg,
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             orig_indices = []
             for row in selected_rows:
                 orig_indices.append(self.table.item(row, 0).data(Qt.UserRole))
             orig_indices.sort(reverse=True)
             for idx in orig_indices:
-                self.passwords.pop(idx)
+                entry = self.passwords.pop(idx)
+                entry_copy = dict(entry)
+                entry_copy["deleted_at"] = now_str
+                self.trash.insert(0, entry_copy)
             self.mark_dirty()
             self.save_and_refresh()
+            self.statusBar().showMessage(i18n._t("moved_to_trash_success"), 2000)
 
     def clear_clipboard(self):
         QApplication.clipboard().clear()
@@ -948,12 +977,14 @@ class MainWindow(QMainWindow):
                 self.master_key,
                 self.master_salt,
                 self.kdf_spec,
+                trash=self.trash,
             )
             self._dirty = False
         except Exception:
             MsgBox.critical(self, i18n._t("error_title"), i18n._t("storage_save_failed"))
             return False
         self.refresh_table()
+        self.update_trash_btn()
         return True
 
     def open_generator(self):
@@ -991,6 +1022,7 @@ class MainWindow(QMainWindow):
                     new_key,
                     new_salt,
                     new_kdf_spec,
+                    trash=self.trash,
                 )
             except Exception as exc:
                 recovery_path = getattr(exc, "recovery_path", None)
@@ -1057,11 +1089,13 @@ class MainWindow(QMainWindow):
             return
         self.vault_path = path
         self.passwords = []
+        self.trash = []
         self.master_key = key
         self.master_salt = salt
         self.kdf_spec = kdf_spec
         self._dirty = False
         self.refresh_table()
+        self.update_trash_btn()
         self.statusBar().showMessage(i18n._t("vault_created"), 3000)
 
     def open_vault(self):
@@ -1088,7 +1122,7 @@ class MainWindow(QMainWindow):
                 return
             pwd = dialog.get_password()
             try:
-                entries, prefs, key, salt, kdf_spec = storage.load_vault(path, pwd)
+                entries, prefs, key, salt, kdf_spec, trash = storage.load_vault(path, pwd)
             except storage.VaultError as exc:
                 if exc.reason == "wrong_password":
                     MsgBox.warning(self, i18n._t("error_title"), i18n._t("decrypt_error"))
@@ -1100,12 +1134,14 @@ class MainWindow(QMainWindow):
                 return
             self.vault_path = path
             self.passwords, _ = storage.ensure_entry_ids(entries)
+            self.trash, _ = storage.ensure_entry_ids(trash)
             self.preferences = prefs
             self.master_key = key
             self.master_salt = salt
             self.kdf_spec = kdf_spec
             self._dirty = False
             self.refresh_table()
+            self.update_trash_btn()
             self.statusBar().showMessage(i18n._t("vault_opened"), 3000)
             return
 
@@ -1130,7 +1166,7 @@ def _resolve_initial_vault_path(argv):
 
 
 def _try_open_vault_for_startup(path, parent=None):
-    """启动时尝试打开 vault 文件。返回 (entries, prefs, key, salt, kdf_spec) 或 None。"""
+    """启动时尝试打开 vault 文件。返回 (entries, prefs, key, salt, kdf_spec, trash) 或 None。"""
     if not storage.is_vault_file(path):
         MsgBox.warning(parent, i18n._t("vault_open_error_title"), i18n._t("vault_format_unsupported"))
         return None
@@ -1153,7 +1189,7 @@ def _try_open_vault_for_startup(path, parent=None):
 
 
 def _create_vault_for_startup(path, parent=None):
-    """启动时新建 vault。返回 (entries, prefs, key, salt, kdf_spec) 或 None。"""
+    """启动时新建 vault。返回 (entries, prefs, key, salt, kdf_spec, trash) 或 None。"""
     while True:
         dialog = AuthDialog("setup", parent)
         if not dialog.exec():
@@ -1161,7 +1197,7 @@ def _create_vault_for_startup(path, parent=None):
         pwd = dialog.get_password()
         try:
             key, salt, kdf_spec = storage.create_new_vault(path, pwd)
-            return [], storage.DEFAULT_PREFERENCES.copy(), key, salt, kdf_spec
+            return [], storage.DEFAULT_PREFERENCES.copy(), key, salt, kdf_spec, []
         except Exception:
             MsgBox.critical(parent, i18n._t("vault_create_error_title"), i18n._t("vault_save_failed"))
             return None
@@ -1170,7 +1206,7 @@ def _create_vault_for_startup(path, parent=None):
 def _migrate_legacy_for_startup(legacy_info, parent=None):
     """启动时迁移旧版 passwords.json → v3 .kgvault。
 
-    返回 (vault_path, entries, prefs, key, salt, kdf_spec) 或 None。
+    返回 (vault_path, entries, prefs, key, salt, kdf_spec, trash) 或 None。
     迁移成功后清理旧 data/ 目录和根目录旧文件。
     """
     while True:
@@ -1198,7 +1234,7 @@ def _migrate_legacy_for_startup(legacy_info, parent=None):
             MsgBox.critical(parent, i18n._t("vault_open_error_title"), i18n._t("vault_load_failed"))
             return None
         try:
-            entries, prefs, k2, s2, kdf2 = storage.load_vault(target_path, pwd)
+            entries, prefs, k2, s2, kdf2, trash2 = storage.load_vault(target_path, pwd)
         except storage.VaultError:
             MsgBox.critical(parent, i18n._t("vault_open_error_title"), i18n._t("vault_load_failed"))
             return None
@@ -1209,7 +1245,7 @@ def _migrate_legacy_for_startup(legacy_info, parent=None):
             i18n._t("vault_migrated_title"),
             i18n._t("vault_migrated_msg").format(path=target_path),
         )
-        return target_path, entries, prefs, k2, s2, kdf2
+        return target_path, entries, prefs, k2, s2, kdf2, trash2
 
 
 def main():
@@ -1246,12 +1282,13 @@ def main():
     master_key = None
     master_salt = None
     kdf_spec = None
+    trash = None
 
     if init_vault_path:
         result = _try_open_vault_for_startup(init_vault_path)
         if result is None:
             sys.exit(0)
-        entries, prefs, master_key, master_salt, kdf_spec = result
+        entries, prefs, master_key, master_salt, kdf_spec, trash = result
         vault_path = init_vault_path
     else:
         # 优先检测旧 passwords.json，自动迁移
@@ -1260,7 +1297,7 @@ def main():
             migrated = _migrate_legacy_for_startup(legacy_info)
             if migrated is None:
                 sys.exit(0)
-            vault_path, entries, prefs, master_key, master_salt, kdf_spec = migrated
+            vault_path, entries, prefs, master_key, master_salt, kdf_spec, trash = migrated
         else:
             # 扫描 EXE 同目录下的 .kgvault 文件
             exe_dir = storage.get_app_dir()
@@ -1269,7 +1306,7 @@ def main():
                 result = _try_open_vault_for_startup(found_vaults[0])
                 if result is None:
                     sys.exit(0)
-                entries, prefs, master_key, master_salt, kdf_spec = result
+                entries, prefs, master_key, master_salt, kdf_spec, trash = result
                 vault_path = found_vaults[0]
             else:
                 # 0 个或多于 1 个 → 引导界面
@@ -1281,13 +1318,13 @@ def main():
                     result = _create_vault_for_startup(chosen_path)
                     if result is None:
                         sys.exit(0)
-                    entries, prefs, master_key, master_salt, kdf_spec = result
+                    entries, prefs, master_key, master_salt, kdf_spec, trash = result
                     vault_path = chosen_path
                 elif picker.chosen_action == "open":
                     result = _try_open_vault_for_startup(chosen_path)
                     if result is None:
                         sys.exit(0)
-                    entries, prefs, master_key, master_salt, kdf_spec = result
+                    entries, prefs, master_key, master_salt, kdf_spec, trash = result
                     vault_path = chosen_path
 
     if lang != prefs.get("language", lang):
@@ -1299,7 +1336,7 @@ def main():
         app._qt_translator.load(f"qt_{locale_name}", translations_path)
         app.installTranslator(app._qt_translator)
 
-    window = MainWindow(vault_path, entries, prefs, master_key, master_salt, kdf_spec)
+    window = MainWindow(vault_path, entries, prefs, master_key, master_salt, kdf_spec, trash=trash)
     window.show()
     sys.exit(app.exec())
 

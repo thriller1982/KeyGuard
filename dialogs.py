@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QToolButton,
     QVBoxLayout,
+    QWidget,
 )
 
 import crypto_utils
@@ -1005,3 +1007,237 @@ class TwoFactorDialog(QDialog):
 
     def get_secret(self):
         return self.secret_input.text().strip()
+
+
+class TrashDialog(QDialog):
+    """回收站对话框：展示已删除的条目，支持搜索、多选恢复、彻底删除以及一键清空回收站。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent if isinstance(parent, QWidget) else None)
+        self.resize(750, 480)
+        self.setMinimumSize(560, 360)
+
+        self.main_window = parent
+
+        layout = QVBoxLayout(self)
+
+        top_layout = QHBoxLayout()
+        self.search_bar = QLineEdit()
+        self.search_bar.setClearButtonEnabled(True)
+        self.search_bar.textChanged.connect(self.refresh_table)
+        top_layout.addWidget(self.search_bar)
+        layout.addLayout(top_layout)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.itemSelectionChanged.connect(self.on_selection_changed)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
+        layout.addWidget(self.table)
+
+        bottom_layout = QHBoxLayout()
+        self.status_label = QLabel()
+        bottom_layout.addWidget(self.status_label)
+        bottom_layout.addStretch()
+
+        self.restore_btn = QPushButton()
+        self.restore_btn.clicked.connect(self.restore_selected)
+        bottom_layout.addWidget(self.restore_btn)
+
+        self.permanent_delete_btn = QPushButton()
+        self.permanent_delete_btn.clicked.connect(self.delete_permanently)
+        bottom_layout.addWidget(self.permanent_delete_btn)
+
+        self.empty_trash_btn = QPushButton()
+        self.empty_trash_btn.clicked.connect(self.empty_trash)
+        bottom_layout.addWidget(self.empty_trash_btn)
+
+        self.close_btn = QPushButton()
+        self.close_btn.clicked.connect(self.accept)
+        bottom_layout.addWidget(self.close_btn)
+
+        layout.addLayout(bottom_layout)
+
+        self.retranslate_ui()
+        self.refresh_table()
+
+    def retranslate_ui(self):
+        self.setWindowTitle(i18n._t("trash_title"))
+        self.search_bar.setPlaceholderText(i18n._t("trash_search_placeholder"))
+        headers = [
+            i18n._t("trash_col_name"),
+            i18n._t("trash_col_user"),
+            i18n._t("trash_col_url"),
+            i18n._t("trash_col_category"),
+            i18n._t("trash_col_deleted_at"),
+        ]
+        self.table.setHorizontalHeaderLabels(headers)
+        self.restore_btn.setText(i18n._t("trash_restore_btn"))
+        self.permanent_delete_btn.setText(i18n._t("trash_permanent_delete_btn"))
+        self.empty_trash_btn.setText(i18n._t("trash_empty_btn"))
+        self.close_btn.setText(i18n._t("btn_ok"))
+
+    def _get_category_text(self, category):
+        if self.main_window and hasattr(self.main_window, "get_category_text"):
+            return self.main_window.get_category_text(category)
+        return category
+
+    def refresh_table(self):
+        self.table.setRowCount(0)
+        search_text = self.search_bar.text().lower().strip()
+        trash = getattr(self.main_window, "trash", []) if self.main_window else []
+
+        for i, entry in enumerate(trash):
+            if search_text:
+                matched = any(
+                    search_text in str(v).lower()
+                    for k, v in entry.items()
+                    if k != "password" and v
+                )
+                if not matched:
+                    continue
+
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+
+            item_name = QTableWidgetItem(entry.get("name", ""))
+            item_name.setData(Qt.UserRole, i)
+            self.table.setItem(row, 0, item_name)
+            self.table.setItem(row, 1, QTableWidgetItem(entry.get("username", "")))
+            self.table.setItem(row, 2, QTableWidgetItem(entry.get("url", "")))
+            self.table.setItem(
+                row, 3, QTableWidgetItem(self._get_category_text(entry.get("category", "other")))
+            )
+            self.table.setItem(row, 4, QTableWidgetItem(entry.get("deleted_at", "")))
+
+        total = len(trash)
+        if total == 0:
+            self.status_label.setText(i18n._t("trash_empty_hint"))
+        else:
+            self.status_label.setText(i18n._t("trash_status_count").format(total))
+
+        self.on_selection_changed()
+
+    def on_selection_changed(self):
+        selected_rows = self.table.selectedRanges()
+        num_selected = sum(r.bottomRow() - r.topRow() + 1 for r in selected_rows)
+        has_sel = num_selected > 0
+        total_trash = len(getattr(self.main_window, "trash", [])) if self.main_window else 0
+
+        self.restore_btn.setEnabled(has_sel)
+        self.permanent_delete_btn.setEnabled(has_sel)
+        self.empty_trash_btn.setEnabled(total_trash > 0)
+
+    def _get_selected_original_indices(self):
+        selected_rows = set()
+        for r in self.table.selectedRanges():
+            for i in range(r.topRow(), r.bottomRow() + 1):
+                selected_rows.add(i)
+        orig_indices = []
+        for r in selected_rows:
+            item = self.table.item(r, 0)
+            if item:
+                orig_indices.append(item.data(Qt.UserRole))
+        orig_indices.sort(reverse=True)
+        return orig_indices
+
+    def restore_selected(self):
+        orig_indices = self._get_selected_original_indices()
+        if not orig_indices or not self.main_window:
+            return
+
+        restored_count = len(orig_indices)
+        for idx in orig_indices:
+            if 0 <= idx < len(self.main_window.trash):
+                entry = self.main_window.trash.pop(idx)
+                entry.pop("deleted_at", None)
+                self.main_window.passwords.append(entry)
+
+        self.main_window.mark_dirty()
+        self.main_window.save_and_refresh()
+        self.refresh_table()
+        if hasattr(self.main_window, "statusBar"):
+            self.main_window.statusBar().showMessage(
+                i18n._t("restore_success").format(restored_count), 2000
+            )
+
+    def delete_permanently(self):
+        orig_indices = self._get_selected_original_indices()
+        if not orig_indices or not self.main_window:
+            return
+
+        count = len(orig_indices)
+        if count == 1:
+            entry = self.main_window.trash[orig_indices[0]]
+            msg = i18n._t("confirm_perm_delete_msg").format(entry.get("name", ""))
+        else:
+            msg = i18n._t("confirm_perm_delete_msg_plural").format(count)
+
+        reply = MsgBox.question(
+            self,
+            i18n._t("confirm_perm_delete_title"),
+            msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        for idx in orig_indices:
+            if 0 <= idx < len(self.main_window.trash):
+                self.main_window.trash.pop(idx)
+
+        self.main_window.mark_dirty()
+        self.main_window.save_and_refresh()
+        self.refresh_table()
+        if hasattr(self.main_window, "statusBar"):
+            self.main_window.statusBar().showMessage(
+                i18n._t("perm_delete_success").format(count), 2000
+            )
+
+    def empty_trash(self):
+        if not self.main_window or not self.main_window.trash:
+            return
+
+        reply = MsgBox.question(
+            self,
+            i18n._t("confirm_empty_trash_title"),
+            i18n._t("confirm_empty_trash_msg"),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self.main_window.trash.clear()
+        self.main_window.mark_dirty()
+        self.main_window.save_and_refresh()
+        self.refresh_table()
+        if hasattr(self.main_window, "statusBar"):
+            self.main_window.statusBar().showMessage(
+                i18n._t("trash_cleared_success"), 2000
+            )
+
+    def show_context_menu(self, pos):
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+
+        if not self.table.item(row, 0).isSelected():
+            self.table.clearSelection()
+            self.table.selectRow(row)
+
+        menu = QMenu(self)
+        restore_action = menu.addAction(i18n._t("trash_restore_btn"))
+        delete_action = menu.addAction(i18n._t("trash_permanent_delete_btn"))
+        action = menu.exec(self.table.viewport().mapToGlobal(pos))
+
+        if action == restore_action:
+            self.restore_selected()
+        elif action == delete_action:
+            self.delete_permanently()
+

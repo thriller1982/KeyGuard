@@ -22,14 +22,18 @@ def _window_stub(passwords):
     window = SimpleNamespace(
         vault_path="vault.kgvault",
         passwords=passwords,
+        trash=[],
         preferences={},
         master_key=b"key",
         master_salt=b"salt",
         kdf_spec={},
         _dirty=True,
         _last_totp_secret="",
+        reset_idle_timer=lambda: None,
     )
     window._write_vault = MethodType(main.MainWindow._write_vault, window)
+    window.update_trash_btn = MethodType(main.MainWindow.update_trash_btn, window)
+    window.mark_dirty = MethodType(main.MainWindow.mark_dirty, window)
     return window
 
 
@@ -40,10 +44,11 @@ def test_save_and_refresh_saves_and_refreshes(monkeypatch):
         main.storage, "save_vault", lambda *args, **kwargs: events.append("save")
     )
     window.refresh_table = lambda: events.append("refresh")
+    window.update_trash_btn = lambda: events.append("trash_btn")
 
     assert main.MainWindow.save_and_refresh(window) is True
     assert window._dirty is False
-    assert events == ["save", "refresh"]
+    assert events == ["save", "refresh", "trash_btn"]
 
 
 def test_save_failure_reports_error(monkeypatch):
@@ -258,3 +263,131 @@ def test_open_totp_remembers_last_secret(monkeypatch):
     monkeypatch.setattr(main, "TwoFactorDialog", StubDialog)
     main.MainWindow.open_totp(window)
     assert window._last_totp_secret == "NEWSECRET"
+
+
+def test_delete_entry_moves_to_trash(monkeypatch):
+    import sys
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QMessageBox, QTableWidget, QTableWidgetItem
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = _window_stub([
+        _entry(id="e1", name="Entry 1"),
+        _entry(id="e2", name="Entry 2"),
+    ])
+    window.statusBar = lambda: SimpleNamespace(showMessage=lambda *args: None)
+    window.refresh_table = lambda: None
+    saved = []
+    window.save_and_refresh = lambda: (saved.append(list(window.trash)), True)[1]
+    monkeypatch.setattr(
+        main.storage,
+        "save_vault",
+        lambda *args, **kwargs: saved.append(kwargs.get("trash")),
+    )
+
+    table = QTableWidget(2, 6)
+    it0 = QTableWidgetItem("Entry 1")
+    it0.setData(Qt.UserRole, 0)
+    table.setItem(0, 0, it0)
+    it1 = QTableWidgetItem("Entry 2")
+    it1.setData(Qt.UserRole, 1)
+    table.setItem(1, 0, it1)
+    table.setCurrentCell(0, 0)
+    window.table = table
+
+    # First: cancel deletion
+    monkeypatch.setattr(main.MsgBox, "question", lambda *args, **kwargs: QMessageBox.No)
+    main.MainWindow.delete_entry(window)
+    assert len(window.passwords) == 2
+    assert len(window.trash) == 0
+
+    # Second: confirm deletion
+    monkeypatch.setattr(main.MsgBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    main.MainWindow.delete_entry(window)
+    assert len(window.passwords) == 1
+    assert window.passwords[0]["id"] == "e2"
+    assert len(window.trash) == 1
+    assert window.trash[0]["id"] == "e1"
+    assert "deleted_at" in window.trash[0]
+    assert len(saved) == 1
+
+
+def test_update_trash_btn():
+    import sys
+    from PySide6.QtWidgets import QApplication, QPushButton
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = _window_stub([])
+    btn = QPushButton()
+    window.trash_btn = btn
+
+    # When trash is empty
+    window.trash = []
+    main.MainWindow.update_trash_btn(window)
+    assert "(" not in btn.text()
+    assert len(btn.text()) > 0
+
+    # When trash has 3 items
+    window.trash = [{"name": "1"}, {"name": "2"}, {"name": "3"}]
+    main.MainWindow.update_trash_btn(window)
+    assert "(3)" in btn.text()
+
+
+def test_trash_dialog_operations(monkeypatch):
+    import sys
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = _window_stub([_entry(id="active1", name="Active 1")])
+    window.trash = [
+        _entry(id="t1", name="Trash 1", deleted_at="2026-11-07 10:00:00"),
+        _entry(id="t2", name="Trash 2", deleted_at="2026-11-07 10:05:00"),
+    ]
+    window.statusBar = lambda: SimpleNamespace(showMessage=lambda *args: None)
+    window.refresh_table = lambda: None
+    saved = []
+    window.save_and_refresh = lambda: (saved.append(True), True)[1]
+    monkeypatch.setattr(main.storage, "save_vault", lambda *args, **kwargs: saved.append(True))
+
+    dlg = main.TrashDialog(window)
+    assert dlg.table.rowCount() == 2
+
+    # Select row 0 (Trash 1) and restore
+    dlg.table.selectRow(0)
+    dlg.restore_selected()
+    assert len(window.passwords) == 2
+    assert window.passwords[-1]["name"] == "Trash 1"
+    assert "deleted_at" not in window.passwords[-1]
+    assert len(window.trash) == 1
+    assert window.trash[0]["name"] == "Trash 2"
+    assert dlg.table.rowCount() == 1
+
+    # Select row 0 (Trash 2) and delete permanently (accept dialog)
+    monkeypatch.setattr(main.MsgBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    dlg.table.selectRow(0)
+    dlg.delete_permanently()
+    assert len(window.trash) == 0
+    assert dlg.table.rowCount() == 0
+
+    # Add item to trash and test empty_trash
+    window.trash = [_entry(id="t3", name="Trash 3")]
+    dlg.refresh_table()
+    assert dlg.table.rowCount() == 1
+    dlg.empty_trash()
+    assert len(window.trash) == 0
+
+
+def test_trash_button_layout_in_bottom_right(monkeypatch):
+    import sys
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    monkeypatch.setattr(main.storage, "save_vault", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main.MainWindow, "closeEvent", lambda self, event: event.accept())
+
+    win = main.MainWindow("test.kgvault", [], {}, b"k" * 32, b"s" * 16, {})
+    # btn_layout should contain: add_btn (0), delete_btn (1), stretch (2), trash_btn (3)
+    assert win.btn_layout.count() == 4
+    assert win.btn_layout.itemAt(0).widget() == win.add_btn
+    assert win.btn_layout.itemAt(1).widget() == win.delete_btn
+    assert win.btn_layout.itemAt(3).widget() == win.trash_btn
